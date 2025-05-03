@@ -129,7 +129,7 @@ class FarkleGame {
     #lastRound = false;
     #lastPlayer = '';
     #singlePlayerMode = false;
-    #attempts = 3;       // 单人模式尝试次数
+    #attempts = 1;       // 单人模式尝试次数
     #currentAttempt = 0; // 当前尝试次数
     #leaderboard = [];   // 排行榜
     #lastRollResult = []; // 最后一次投掷结果
@@ -154,7 +154,7 @@ class FarkleGame {
             this.#lastRound = false;
             this.#lastPlayer = '';
             this.#singlePlayerMode = false;
-            this.#attempts = 3;
+            this.#attempts = 1;
             this.#currentAttempt = 0;
             this.#leaderboard = [];
             this.#lastRollResult = [];
@@ -225,7 +225,7 @@ class FarkleGame {
             this.#lastRound = obj.lastRound || false;
             this.#lastPlayer = obj.lastPlayer || '';
             this.#singlePlayerMode = obj.singlePlayerMode || false;
-            this.#attempts = obj.attempts || 3;
+            this.#attempts = obj.attempts || 1;
             this.#currentAttempt = obj.currentAttempt || 0;
             this.#leaderboard = obj.leaderboard || [];
             this.#lastRollResult = obj.lastRollResult || [];
@@ -249,7 +249,7 @@ class FarkleGame {
             this.#lastRound = false;
             this.#lastPlayer = '';
             this.#singlePlayerMode = false;
-            this.#attempts = 3;
+            this.#attempts = 1;
             this.#currentAttempt = 0;
             this.#leaderboard = [];
             this.#lastRollResult = [];
@@ -391,19 +391,36 @@ class FarkleGame {
             let farkleMsg = `Farkle! 投掷结果 [${this.#lastRollResult.join(', ')}] 没有得分组合，失去当前回合分数`;
             
             if (this.#singlePlayerMode) {
-                // 记录当前尝试的得分（在Farkle情况下为0）
+                // 记录当前尝试的得分（在Farkle情况下为当前总分，因为已经endTurn）
                 this.#singlePlayerScores[this.#currentAttempt - 1] = player.score;
                 
                 // 单人模式下，结束当前尝试，开始下一次尝试或结束游戏
                 if (this.#currentAttempt >= this.#attempts) {
-                    // 完成单人游戏并获取结果，但不重置
+                    // 完成单人游戏并获取结果
                     let gameResult = this.finishSinglePlayerGame();
                     
-                    // 构建结果消息 - 不再提及游戏重置
+                    // 构建结果消息
                     let msg = farkleMsg + '\n您已用完所有尝试次数，游戏结束\n';
                     msg += `最终得分: ${gameResult.bestScore}分\n`;
                     
                     return [false, msg];
+                } else {
+                    // 增加尝试次数
+                    this.#currentAttempt++;
+                    
+                    // 重置玩家状态
+                    player.resetScore();
+                    player.startTurn();
+                    
+                    // 清空骰子状态
+                    this.#dice = [];
+                    this.#selectedDice = [];
+                    this.#hasSelectedDiceInCurrentRoll = false;
+                    
+                    // 更新游戏状态
+                    this.#status = FarkleGame.StSinglePlayer;
+                    
+                    return [false, farkleMsg + `\n第${this.#currentAttempt-1}次尝试结束。开始第${this.#currentAttempt}次尝试，共${this.#attempts}次`];
                 }
             } else {
                 this.nextPlayer();
@@ -415,6 +432,7 @@ class FarkleGame {
         this.#status = FarkleGame.StRolled;
         return [true, ''];
     }
+    
 
     // 结束单人游戏并更新排行榜
     finishSinglePlayerGame() {
@@ -469,6 +487,11 @@ class FarkleGame {
         let combos = [];
         let counts = [0, 0, 0, 0, 0, 0, 0]; // 索引0不使用，1-6对应骰子点数
         
+         // 检查骰子数组是否为空
+        if (!this.#dice || this.#dice.length === 0) {
+            return combos; // 返回空数组
+        }
+
         for (let die of this.#dice) {
             counts[die]++;
         }
@@ -927,24 +950,36 @@ class FarkleGame {
 
     // 新回合（仅单人模式）
     newRound(playerId) {
-        if (!this.#singlePlayerMode || this.#status !== FarkleGame.StSinglePlayer) {
-            return [false, '仅在单人模式可用'];
-        }
-        
-        if (playerId !== this.#currentPlayerId) {
-            return [false, '不是当前玩家'];
-        }
-        
-        // 清空骰子状态
-        this.#dice = [];
-        this.#selectedDice = [];
-        
-        // 开始新回合
-        let player = this.#players.get(playerId);
-        player.startTurn();
-        
-        return [true, '开始新回合'];
+    // 修改条件：只检查是否为单人模式，不再严格检查游戏状态
+    if (!this.#singlePlayerMode) {
+        return [false, '仅在单人模式可用'];
     }
+    
+    // 检查游戏是否已结束
+    if (this.#status === FarkleGame.StFinished) {
+        return [false, '游戏已结束，请开始新游戏'];
+    }
+    
+    if (playerId !== this.#currentPlayerId) {
+        return [false, '不是当前玩家'];
+    }
+    
+    // 清空骰子状态
+    this.#dice = [];
+    this.#selectedDice = [];
+    this.#hasSelectedDiceInCurrentRoll = false;
+    
+    // 开始新回合
+    let player = this.#players.get(playerId);
+    player.resetScore(); // 确保分数重置
+    player.startTurn();
+    
+    // 设置游戏状态为单人模式
+    this.#status = FarkleGame.StSinglePlayer;
+    
+    return [true, '开始新回合'];
+    }
+
 
     describe() {
         let s = '';
