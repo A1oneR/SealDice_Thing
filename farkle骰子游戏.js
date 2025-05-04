@@ -341,7 +341,7 @@ class FarkleGame {
         this.#singlePlayerScores = []; // 清空之前的尝试记录
         this.#players.get(id).startTurn();
         
-        return [true, '开始单人模式，这是第1次尝试，共3次'];
+        return [true, '开始单人模式，这是第1次尝试，共1次'];
     }
 
     roll() {
@@ -640,6 +640,10 @@ class FarkleGame {
     }
 
     calculateScore(selectedDice) {
+        let score = 0;
+        // 创建一个副本用于跟踪处理过的骰子
+        let remainingDice = [...selectedDice];
+
         if (selectedDice.length === 0) return 0;
         
         // 计算每个点数的出现次数
@@ -671,9 +675,33 @@ class FarkleGame {
             if (pairCount === 3) return 1500; // 三对得1500分
         }
         
-        // 检查五个相同
+            // 检查五个相同 - 修改这部分
+        let hasFiveOfAKind = false;
         for (let i = 1; i <= 6; i++) {
-            if (counts[i] === 5) return 2000;
+            if (counts[i] === 5) {
+                hasFiveOfAKind = true;
+                score += 2000;  // 加上五个相同的分数
+                
+                // 减少计数，后续处理剩余骰子
+                counts[i] -= 5;
+                break;  // 一次只能有一组五个相同
+            }
+        }
+    
+        // 如果有五个相同，处理剩余骰子
+        if (hasFiveOfAKind) {
+            // 处理剩余的1和5
+            for (let i = 1; i <= 6; i++) {
+                if (i === 1 && counts[i] > 0) {
+                    score += counts[i] * 100;  // 每个1加100分
+                } else if (i === 5 && counts[i] > 0) {
+                   score += counts[i] * 50;   // 每个5加50分
+                } else if (counts[i] > 0) {
+                    // 如果还有其他非得分骰子，则得分无效
+                    return 0;
+                }
+            }
+            return score;
         }
         
         // 检查四个相同，并分别计算
@@ -705,9 +733,6 @@ class FarkleGame {
             return score;
         }
         
-        // 创建一个副本用于跟踪处理过的骰子
-        let remainingDice = [...selectedDice];
-        let score = 0;
         
         // 处理三个相同的情况
         for (let i = 1; i <= 6; i++) {
@@ -792,7 +817,7 @@ class FarkleGame {
                 this.#selectedDice = [];
                 this.#status = FarkleGame.StSinglePlayer;
                 
-                return [true, `回合结束，第${this.#currentAttempt-1}次尝试得分: ${currentScore}分\n这是第${this.#currentAttempt}次尝试，共3次`];
+                return [true, `回合结束，第${this.#currentAttempt-1}次尝试得分: ${currentScore}分\n这是第${this.#currentAttempt}次尝试，共1次`];
             }
         }
         
@@ -1181,7 +1206,7 @@ cmd.help = `Farkle(快艇骰子) v${VERSION} by Air
 .f join/加入                    加入游戏
 .f quit/退出                    退出游戏
 .f start/开始                   开始游戏(至少2名玩家)
-.f single/单人                  开始单人模式(3次尝试)
+.f single/单人                  开始单人模式(1次尝试)
 .f roll/投掷                    投掷骰子
 .f select/选择 1,1,5            选择得分骰子(用逗号分隔)
 .f bank/存分                    结束回合，保存当前得分
