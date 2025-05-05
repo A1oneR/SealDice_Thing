@@ -135,6 +135,7 @@ class FarkleGame {
     #lastRollResult = []; // 最后一次投掷结果
     #singlePlayerScores = []; // 单人模式下各次尝试的得分
     #hasSelectedDiceInCurrentRoll = false; // 新增：跟踪当前投掷是否已选择骰子
+    #ruleSet = 1;
     #honorChanges = new Map(); // 新增：记录每个玩家的荣誉分变化
 
     static StIdle = 'idle';
@@ -161,6 +162,7 @@ class FarkleGame {
             this.#singlePlayerScores = [];
             this.#hasSelectedDiceInCurrentRoll = false; // 初始化新属性
             this.#honorChanges = new Map();
+            this.#ruleSet = 1; // 添加规则集属性，默认为规则1
             
             // 加载玩家数据
             if (playerData && Object.keys(playerData).length > 0) {
@@ -231,6 +233,7 @@ class FarkleGame {
             this.#lastRollResult = obj.lastRollResult || [];
             this.#singlePlayerScores = obj.singlePlayerScores || [];
             this.#hasSelectedDiceInCurrentRoll = obj.hasSelectedDiceInCurrentRoll || false; // 从保存状态恢复
+            this.#ruleSet = obj.ruleSet || 1; // 恢复规则集设置
             this.#honorChanges = new Map();
             if (obj.honorChanges) {
                 for (let [k, v] of obj.honorChanges) {
@@ -255,6 +258,7 @@ class FarkleGame {
             this.#lastRollResult = [];
             this.#singlePlayerScores = [];
             this.#hasSelectedDiceInCurrentRoll = false; // 出错时使用默认值
+            this.#ruleSet = 1; // 出错时使用默认规则
             this.#honorChanges = new Map();
         }
     }
@@ -264,7 +268,30 @@ class FarkleGame {
             // 如果玩家已存在，更新其数据
             if (this.#players.has(id)) {
                 let player = this.#players.get(id);
-                // 这里保持玩家当前游戏中的分数不变，只更新持久化数据
+                // 这里实际更新玩家持久化数据
+                // 注意：由于Player对象的设计，我们需要创建新对象来替换
+                let currentScore = player.score;
+                let currentTurnScore = player.turnScore;
+                let isInTurn = player.inTurn;
+                
+                // 创建新Player对象来替换现有对象
+                this.#players.set(id, new Player(
+                    data.name || id,
+                    currentScore, // 保留当前游戏分数
+                    data.honor || 0,
+                    data.highestRoll || 0,
+                    data.wins || 0,
+                    data.losses || 0,
+                    data.totalScore || 0,
+                    data.gamesPlayed || 0
+                ));
+                
+                // 恢复回合状态
+                if (isInTurn) {
+                    let updatedPlayer = this.#players.get(id);
+                    updatedPlayer.startTurn();
+                    updatedPlayer.addTurnScore(currentTurnScore);
+                }
             } else {
                 // 如果是新玩家，创建玩家对象
                 this.#players.set(id, new Player(
@@ -281,10 +308,22 @@ class FarkleGame {
         }
     }
 
+    // 修改getPlayerPersistentData方法，使其保留现有数据
     getPlayerPersistentData() {
-        let data = {};
+      // 先获取现有的持久化数据
+        let existingData = {};
+        try {
+            let playerDataKey = 'farkle:playerData';
+            let rawData = ext.storageGet(playerDataKey) || '{}';
+            existingData = JSON.parse(rawData);
+        } catch (e) {
+            console.log("解析现有玩家数据出错:", e);
+            existingData = {};
+        }
+    
+        // 更新当前游戏中玩家的数据，但不删除其他玩家的数据
         for (let [id, player] of this.#players.entries()) {
-            data[id] = {
+            existingData[id] = {
                 name: player.name,
                 honor: player.honor,
                 highestRoll: player.highestRoll, 
@@ -294,14 +333,57 @@ class FarkleGame {
                 gamesPlayed: player.gamesPlayed
             };
         }
-        return data;
+        return existingData;
     }
 
+    // 添加切换规则的方法
+    setRuleSet(ruleSet) {
+        if (ruleSet === 1 || ruleSet === 2) {
+            this.#ruleSet = ruleSet;
+            return [true, `已切换到规则${ruleSet}`];
+        }
+        return [false, '无效的规则集，请选择1或2'];
+    }
+
+    // 获取当前规则集
+    getRuleSet() {
+        return this.#ruleSet;
+    }
+
+    // 修改addPlayer方法，让它保留玩家的持久化数据
     addPlayer(id, name = '') {
         if (!name) name = id;
         if (this.#status !== FarkleGame.StIdle) return [false, '游戏已开始'];
         if (this.#players.has(id)) return [false, '玩家已存在'];
-        this.#players.set(id, new Player(name));
+    
+        // 获取玩家持久化数据
+        let playerData = {};
+        try {
+            let playerDataKey = 'farkle:playerData';
+            let rawData = ext.storageGet(playerDataKey) || '{}';
+            playerData = JSON.parse(rawData);
+        } catch (e) {
+            console.log("解析玩家数据出错:", e);
+        }
+    
+        // 检查是否有持久化数据
+        if (playerData[id]) {
+            // 使用持久化数据创建玩家对象
+            this.#players.set(id, new Player(
+                name, // 使用当前名字
+                0,    // 游戏分数重置为0
+                playerData[id].honor || 0,
+                playerData[id].highestRoll || 0,
+                playerData[id].wins || 0,
+                playerData[id].losses || 0,
+                playerData[id].totalScore || 0,
+                playerData[id].gamesPlayed || 0
+            ));
+        } else {
+            // 如果没有持久化数据，创建新玩家
+            this.#players.set(id, new Player(name));
+        }
+        
         return [true, ''];
     }
 
@@ -487,13 +569,50 @@ class FarkleGame {
         let combos = [];
         let counts = [0, 0, 0, 0, 0, 0, 0]; // 索引0不使用，1-6对应骰子点数
         
-         // 检查骰子数组是否为空
+        // 检查骰子数组是否为空
         if (!this.#dice || this.#dice.length === 0) {
             return combos; // 返回空数组
         }
-
+    
         for (let die of this.#dice) {
             counts[die]++;
+        }
+        
+        // 规则2：检查"六不搭"（六个骰子均无得分组合）
+        if (this.#ruleSet === 2 && this.#dice.length === 6) {
+            // 检查是否没有1和5
+            if (counts[1] === 0 && counts[5] === 0) {
+                // 检查是否没有三个或以上相同的数字
+                let hasThreeOfAKind = false;
+                for (let i = 1; i <= 6; i++) {
+                    if (counts[i] >= 3) {
+                        hasThreeOfAKind = true;
+                        break;
+                    }
+                }
+                
+                // 检查是否没有小顺或大顺
+                let hasStraight = 
+                    (counts[1] >= 1 && counts[2] >= 1 && counts[3] >= 1 && counts[4] >= 1 && counts[5] >= 1) || 
+                    (counts[2] >= 1 && counts[3] >= 1 && counts[4] >= 1 && counts[5] >= 1 && counts[6] >= 1) ||
+                    (counts[1] >= 1 && counts[2] >= 1 && counts[3] >= 1 && counts[4] >= 1 && counts[5] >= 1 && counts[6] >= 1);
+                
+                // 检查是否没有三对
+                let pairCount = 0;
+                for (let i = 1; i <= 6; i++) {
+                    if (counts[i] === 2) pairCount++;
+                    else if (counts[i] === 4) pairCount += 2;
+                    else if (counts[i] === 6) pairCount += 3;
+                }
+                
+                if (!hasThreeOfAKind && !hasStraight && pairCount < 3) {
+                    combos.push({
+                        type: 'noCombination',
+                        dice: [...this.#dice],
+                        score: 500
+                    });
+                }
+            }
         }
         
         // 检查直线 (1-6)
@@ -504,6 +623,27 @@ class FarkleGame {
                 dice: [1, 2, 3, 4, 5, 6],
                 score: 1500
             });
+        }
+        
+        // 规则2：检查小顺 (1-5) 或 (2-6)
+        if (this.#ruleSet === 2) {
+            if (counts[1] >= 1 && counts[2] >= 1 && counts[3] >= 1 && 
+                counts[4] >= 1 && counts[5] >= 1) {
+                combos.push({
+                    type: 'smallStraight',
+                    dice: [1, 2, 3, 4, 5],
+                    score: 750
+                });
+            }
+            
+            if (counts[2] >= 1 && counts[3] >= 1 && counts[4] >= 1 && 
+                counts[5] >= 1 && counts[6] >= 1) {
+                combos.push({
+                    type: 'smallStraight',
+                    dice: [2, 3, 4, 5, 6],
+                    score: 750
+                });
+            }
         }
         
         // 检查三对
@@ -529,51 +669,84 @@ class FarkleGame {
         }
         
         // 检查六个相同
-        for (let i = 1; i <= 6; i++) {
-            if (counts[i] === 6) {
-                combos.push({
-                    type: 'sixOfAKind',
-                    dice: Array(6).fill(i),
-                    score: 3000
-                });
+        if (this.#ruleSet === 2) {
+            // 规则2下的得分计算
+            for (let i = 1; i <= 6; i++) {
+                if (counts[i] === 6) {
+                    let baseScore = i === 1 ? 8000 : i * 800;
+                    combos.push({
+                        type: 'sixOfAKind',
+                        dice: Array(6).fill(i),
+                        score: baseScore
+                    });
+                }
+                
+                if (counts[i] === 5) {
+                    let baseScore = i === 1 ? 4000 : i * 400;
+                    combos.push({
+                        type: 'fiveOfAKind',
+                        dice: Array(5).fill(i),
+                        score: baseScore
+                    });
+                }
+                
+                if (counts[i] === 4) {
+                    let baseScore = i === 1 ? 2000 : i * 200;
+                    combos.push({
+                        type: 'fourOfAKind',
+                        dice: Array(4).fill(i),
+                        score: baseScore
+                    });
+                }
+                
+                if (counts[i] === 3) {
+                    let score = i === 1 ? 1000 : i * 100;
+                    combos.push({
+                        type: 'threeOfAKind',
+                        dice: Array(3).fill(i),
+                        score: score
+                    });
+                }
+            }
+        } else {
+            // 原有规则的得分计算
+            for (let i = 1; i <= 6; i++) {
+                if (counts[i] === 6) {
+                    combos.push({
+                        type: 'sixOfAKind',
+                        dice: Array(6).fill(i),
+                        score: 3000
+                    });
+                }
+                
+                if (counts[i] === 5) {
+                    combos.push({
+                        type: 'fiveOfAKind',
+                        dice: Array(5).fill(i),
+                        score: 2000
+                    });
+                }
+                
+                if (counts[i] === 4) {
+                    combos.push({
+                        type: 'fourOfAKind',
+                        dice: Array(4).fill(i),
+                        score: 1000
+                    });
+                }
+                
+                if (counts[i] >= 3) {
+                    let score = i === 1 ? 1000 : i * 100;
+                    combos.push({
+                        type: 'threeOfAKind',
+                        dice: Array(3).fill(i),
+                        score: score
+                    });
+                }
             }
         }
         
-        // 检查五个相同
-        for (let i = 1; i <= 6; i++) {
-            if (counts[i] === 5) {
-                combos.push({
-                    type: 'fiveOfAKind',
-                    dice: Array(5).fill(i),
-                    score: 2000
-                });
-            }
-        }
-        
-        // 检查四个相同
-        for (let i = 1; i <= 6; i++) {
-            if (counts[i] === 4) {
-                combos.push({
-                    type: 'fourOfAKind',
-                    dice: Array(4).fill(i),
-                    score: 1000
-                });
-            }
-        }
-        
-        // 检查三个相同
-        for (let i = 1; i <= 6; i++) {
-            if (counts[i] >= 3) {
-                let score = i === 1 ? 1000 : i * 100;
-                combos.push({
-                    type: 'threeOfAKind',
-                    dice: Array(3).fill(i),
-                    score: score
-                });
-            }
-        }
-        
-        // 检查单个1和5
+        // 检查单个1和5（这部分两个规则都一样）
         if (counts[1] >= 1) {
             combos.push({
                 type: 'single',
@@ -643,13 +816,46 @@ class FarkleGame {
         let score = 0;
         // 创建一个副本用于跟踪处理过的骰子
         let remainingDice = [...selectedDice];
-
+    
         if (selectedDice.length === 0) return 0;
         
         // 计算每个点数的出现次数
         let counts = [0, 0, 0, 0, 0, 0, 0]; // 索引0不使用，1-6对应骰子点数
         for (let die of selectedDice) {
             counts[die]++;
+        }
+        
+        // 规则2：检查"六不搭"（六个骰子均无得分组合）
+        if (this.#ruleSet === 2 && selectedDice.length === 6) {
+            // 检查是否没有1和5
+            if (counts[1] === 0 && counts[5] === 0) {
+                // 检查是否没有三个或以上相同的数字
+                let hasThreeOfAKind = false;
+                for (let i = 1; i <= 6; i++) {
+                    if (counts[i] >= 3) {
+                        hasThreeOfAKind = true;
+                        break;
+                    }
+                }
+                
+                // 检查是否没有小顺或大顺
+                let hasStraight = 
+                    (counts[1] >= 1 && counts[2] >= 1 && counts[3] >= 1 && counts[4] >= 1 && counts[5] >= 1) || 
+                    (counts[2] >= 1 && counts[3] >= 1 && counts[4] >= 1 && counts[5] >= 1 && counts[6] >= 1) ||
+                    (counts[1] >= 1 && counts[2] >= 1 && counts[3] >= 1 && counts[4] >= 1 && counts[5] >= 1 && counts[6] >= 1);
+                
+                // 检查是否没有三对
+                let pairCount = 0;
+                for (let i = 1; i <= 6; i++) {
+                    if (counts[i] === 2) pairCount++;
+                    else if (counts[i] === 4) pairCount += 2;
+                    else if (counts[i] === 6) pairCount += 3;
+                }
+                
+                if (!hasThreeOfAKind && !hasStraight && pairCount < 3) {
+                    return 500; // 六不搭
+                }
+            }
         }
         
         // 检查1-6顺子 (需要恰好6个骰子并且每个点数出现1次)
@@ -659,11 +865,19 @@ class FarkleGame {
             return 1500;
         }
         
-        // 检查六个相同
-        for (let i = 1; i <= 6; i++) {
-            if (counts[i] === 6) return 3000;
+        // 规则2：检查小顺 (1-5) 或 (2-6)
+        if (this.#ruleSet === 2 && selectedDice.length === 5) {
+            if (counts[1] === 1 && counts[2] === 1 && counts[3] === 1 && 
+                counts[4] === 1 && counts[5] === 1) {
+                return 750;
+            }
+            
+            if (counts[2] === 1 && counts[3] === 1 && counts[4] === 1 && 
+                counts[5] === 1 && counts[6] === 1) {
+                return 750;
+            }
         }
-
+    
         // 检查三对 (需要恰好6个骰子，且可以形成3对)
         if (selectedDice.length === 6) {
             let pairCount = 0;
@@ -671,68 +885,135 @@ class FarkleGame {
                 if (counts[i] === 2) pairCount++;
                 // 如果有4个相同，当作2对计算
                 else if (counts[i] === 4) pairCount += 2;
+                // 如果有6个相同，当作3对计算
+                else if (counts[i] === 6) pairCount += 3;
             }
             if (pairCount === 3) return 1500; // 三对得1500分
         }
         
-            // 检查五个相同 - 修改这部分
-        let hasFiveOfAKind = false;
-        for (let i = 1; i <= 6; i++) {
-            if (counts[i] === 5) {
-                hasFiveOfAKind = true;
-                score += 2000;  // 加上五个相同的分数
-                
-                // 减少计数，后续处理剩余骰子
-                counts[i] -= 5;
-                break;  // 一次只能有一组五个相同
-            }
-        }
-    
-        // 如果有五个相同，处理剩余骰子
-        if (hasFiveOfAKind) {
-            // 处理剩余的1和5
+        // 根据规则集处理多个相同点数
+        if (this.#ruleSet === 2) {
+            // 规则2的处理方式
+            // 六个相同
             for (let i = 1; i <= 6; i++) {
-                if (i === 1 && counts[i] > 0) {
-                    score += counts[i] * 100;  // 每个1加100分
-                } else if (i === 5 && counts[i] > 0) {
-                   score += counts[i] * 50;   // 每个5加50分
-                } else if (counts[i] > 0) {
-                    // 如果还有其他非得分骰子，则得分无效
-                    return 0;
+                if (counts[i] === 6) {
+                    let baseScore = i === 1 ? 8000 : i * 1600;
+                    return baseScore;
                 }
             }
-            return score;
-        }
-        
-        // 检查四个相同，并分别计算
-        let hasFourOfAKind = false;
-        for (let i = 1; i <= 6; i++) {
-            if (counts[i] === 4) {
-                hasFourOfAKind = true;
-                score += 1000;  // 四个相同的基础分是1000
-                
-                // 减少计数，以便后续处理剩余骰子
-                counts[i] -= 4;
-                break;  // 只处理一组四个相同
-            }
-        }
-    
-         // 如果有四个相同，先单独处理，然后处理剩余骰子
-        if (hasFourOfAKind) {
-            // 处理剩余的1和5
+            
+            // 五个相同
             for (let i = 1; i <= 6; i++) {
-                if (i === 1 && counts[i] > 0) {
-                    score += counts[i] * 100;  // 每个1加100分
-                } else if (i === 5 && counts[i] > 0) {
-                    score += counts[i] * 50;   // 每个5加50分
-                } else if (counts[i] > 0) {
-                    // 如果还有其他非得分骰子，则得分无效
-                    return 0;
+                if (counts[i] === 5) {
+                    let baseScore = i === 1 ? 4000 : i * 800;
+                    
+                    // 处理剩余的1个骰子
+                    counts[i] -= 5;
+                    
+                    // 添加剩余骰子的分数
+                    for (let j = 1; j <= 6; j++) {
+                        if (j === 1 && counts[j] > 0) {
+                            score += counts[j] * 100;
+                        } else if (j === 5 && counts[j] > 0) {
+                            score += counts[j] * 50;
+                        } else if (counts[j] > 0) {
+                            // 如果有其他非得分骰子，则组合无效
+                            return 0;
+                        }
+                    }
+                    
+                    return baseScore + score;
                 }
             }
-            return score;
-        }
+            
+            // 四个相同
+            for (let i = 1; i <= 6; i++) {
+                if (counts[i] === 4) {
+                    let baseScore = i === 1 ? 2000 : i * 400;
+                    
+                    // 处理剩余的骰子
+                    counts[i] -= 4;
+                    
+                    // 添加剩余骰子的分数
+                    for (let j = 1; j <= 6; j++) {
+                        if (j === 1 && counts[j] > 0) {
+                            score += counts[j] * 100;
+                        } else if (j === 5 && counts[j] > 0) {
+                            score += counts[j] * 50;
+                        } else if (counts[j] > 0) {
+                            // 如果有其他非得分骰子，则组合无效
+                            return 0;
+                        }
+                    }
+                    
+                    return baseScore + score;
+                }
+            }
+        } else {
+            // 原规则的处理方式
+            // 六个相同
+            for (let i = 1; i <= 6; i++) {
+                if (counts[i] === 6) return 3000;
+            }
+            
+            // 五个相同
+            let hasFiveOfAKind = false;
+            for (let i = 1; i <= 6; i++) {
+                if (counts[i] === 5) {
+                    hasFiveOfAKind = true;
+                    score += 2000;  // 加上五个相同的分数
+                    
+                    // 减少计数，后续处理剩余骰子
+                    counts[i] -= 5;
+                    break;  // 一次只能有一组五个相同
+                }
+            }
         
+            // 如果有五个相同，处理剩余骰子
+            if (hasFiveOfAKind) {
+                // 处理剩余的1和5
+                for (let i = 1; i <= 6; i++) {
+                    if (i === 1 && counts[i] > 0) {
+                        score += counts[i] * 100;  // 每个1加100分
+                    } else if (i === 5 && counts[i] > 0) {
+                       score += counts[i] * 50;   // 每个5加50分
+                    } else if (counts[i] > 0) {
+                        // 如果还有其他非得分骰子，则得分无效
+                        return 0;
+                    }
+                }
+                return score;
+            }
+            
+            // 四个相同，并分别计算
+            let hasFourOfAKind = false;
+            for (let i = 1; i <= 6; i++) {
+                if (counts[i] === 4) {
+                    hasFourOfAKind = true;
+                    score += 1000;  // 四个相同的基础分是1000
+                    
+                    // 减少计数，以便后续处理剩余骰子
+                    counts[i] -= 4;
+                    break;  // 只处理一组四个相同
+                }
+            }
+        
+            // 如果有四个相同，先单独处理，然后处理剩余骰子
+            if (hasFourOfAKind) {
+                // 处理剩余的1和5
+                for (let i = 1; i <= 6; i++) {
+                    if (i === 1 && counts[i] > 0) {
+                        score += counts[i] * 100;  // 每个1加100分
+                    } else if (i === 5 && counts[i] > 0) {
+                        score += counts[i] * 50;   // 每个5加50分
+                    } else if (counts[i] > 0) {
+                        // 如果还有其他非得分骰子，则得分无效
+                        return 0;
+                    }
+                }
+                return score;
+            }
+        }
         
         // 处理三个相同的情况
         for (let i = 1; i <= 6; i++) {
@@ -741,35 +1022,20 @@ class FarkleGame {
                 score += (i === 1) ? 1000 : i * 100;
                 
                 // 从剩余骰子中移除三个已计分的相同点数
-                let removed = 0;
-                remainingDice = remainingDice.filter(d => {
-                    if (d === i && removed < 3) {
-                        removed++;
-                        return false;
-                    }
-                    return true;
-                });
-                
-                // 更新计数
                 counts[i] -= 3;
             }
         }
         
         // 处理剩余的1和5
-        let filteredDice = [];
-        for (let die of remainingDice) {
-            if (die === 1) {
-                score += 100;
-            } else if (die === 5) {
-                score += 50;
-            } else {
-                filteredDice.push(die); // 保留非得分骰子
+        for (let i = 1; i <= 6; i++) {
+            if (i === 1 && counts[i] > 0) {
+                score += counts[i] * 100;
+            } else if (i === 5 && counts[i] > 0) {
+                score += counts[i] * 50;
+            } else if (counts[i] > 0) {
+                // 如果还有其他非得分骰子，则整个选择无效
+                return 0;
             }
-        }
-        
-        // 如果还有剩余的非得分骰子，则整个选择无效
-        if (filteredDice.length > 0) {
-            return 0;
         }
         
         return score;
@@ -1035,7 +1301,7 @@ class FarkleGame {
             
             return s.trim();
         } else if (this.#singlePlayerMode) {
-            s += `单人模式\n`;
+            s += `单人模式 | 规则${this.#ruleSet}\n`;
             s += `尝试 ${this.#currentAttempt}/${this.#attempts}\n`;
             
             // 显示之前尝试的得分
@@ -1054,7 +1320,7 @@ class FarkleGame {
                 s += `已选骰子: [${this.#selectedDice.join(', ')}]\n`;
             }
         } else {
-            s += `多人模式 | 目标分数: ${this.#targetScore}\n`;
+            s += `多人模式 | 目标分数: ${this.#targetScore} | 规则${this.#ruleSet}\n`;
             
             if (this.#lastRound) {
                 s += `最后一轮! ${this.#players.get(this.#lastPlayer).name} 已达到目标分数\n`;
@@ -1149,6 +1415,63 @@ class FarkleGame {
         };
     }
 
+    // 修改玩家名字
+    changeName(playerId, newName) {
+        if (!newName || typeof newName !== 'string' || newName.trim() === '') {
+            return [false, '名字不能为空'];
+        }
+    
+        // 初始化玩家数据
+        let playerData = {};
+        try {
+            let playerDataKey = 'farkle:playerData';
+            let rawData = ext.storageGet(playerDataKey) || '{}';
+            playerData = JSON.parse(rawData);
+        } catch (e) {
+            console.log("解析玩家数据出错:", e);
+            playerData = {};
+        }
+    
+        // 检查玩家是否存在于持久化数据中
+        if (!playerData[playerId]) {
+            return [false, '找不到玩家数据'];
+        }
+    
+        // 修改名字
+        playerData[playerId].name = newName.trim();
+        
+        // 如果当前游戏中存在该玩家，同时更新游戏中的名字
+        if (this.#players.has(playerId)) {
+            // 由于Player类的设计，我们无法直接修改名字
+            // 需要创建一个新的Player对象并替换现有的
+            let player = this.#players.get(playerId);
+            let newPlayer = new Player(
+                newName.trim(),
+                player.score,
+                player.honor,
+                player.highestRoll,
+                player.wins,
+                player.losses,
+                player.totalScore,
+                player.gamesPlayed
+            );
+        
+            // 如果玩家在回合中，需要保持回合状态
+            if (player.inTurn) {
+                newPlayer.startTurn();
+                newPlayer.addTurnScore(player.turnScore);
+            }
+        
+            this.#players.set(playerId, newPlayer);
+        }
+    
+        // 更新持久化存储
+        let playerDataKey = 'farkle:playerData';
+        ext.storageSet(playerDataKey, JSON.stringify(playerData));
+    
+        return [true, `名字已更改为: ${newName.trim()}`];
+    }
+
     // 添加重置方法
     reset() {
     this.#players.clear();
@@ -1181,7 +1504,8 @@ class FarkleGame {
             lastRollResult: this.#lastRollResult,
             singlePlayerScores: this.#singlePlayerScores,
             hasSelectedDiceInCurrentRoll: this.#hasSelectedDiceInCurrentRoll, // 添加到JSON序列化
-            honorChanges: Array.from(this.#honorChanges.entries())
+            honorChanges: Array.from(this.#honorChanges.entries()),
+            ruleSet: this.#ruleSet  // 添加规则集到JSON
         }
     }
 }
@@ -1214,10 +1538,11 @@ cmd.help = `Farkle(快艇骰子) v${VERSION} by Air
 .f honor/荣誉                   查看个人荣誉积分
 .f leader/荣誉排名 [页码]       查看所有玩家的荣誉积分排名
 .f board/排行                   查看单人模式排行榜
-.f newround/新回合              仅单人模式下开始新回合
+.f rule/规则 [1或2]             切换游戏规则(1=原版,2=扩展规则)
+.f rename/改名 新名字           修改玩家在数据库中的名字
 .f help                         显示帮助信息
 
-得分规则:
+得分规则(原版):
 - 单个1 = 100分
 - 单个5 = 50分
 - 三个相同数字 = 数字×100分 (三个1=1000分)
@@ -1226,6 +1551,13 @@ cmd.help = `Farkle(快艇骰子) v${VERSION} by Air
 - 四个相同 = 1000分
 - 五个相同 = 2000分
 - 六个相同 = 3000分
+
+2号规则修改版：
+- 四个相同 = 三同的双倍得分
+- 五个相同 = 四同的双倍得分
+- 六个相同 = 五同的双倍得分
+- 小顺(连续5个) = 750分
+- 六不搭(六个骰子无得分组合) = 500分
 
 荣誉系统:
 - 游戏胜者获得积分，失败者失去积分
@@ -1277,13 +1609,33 @@ cmd.solve = (ctx, msg, cmdArgs) => {
             break;
         }
         case 'quit': case '退出': {
+            // 先保存当前玩家的持久化数据
+            let currentPlayerData = game.getPlayerPersistentData();
+            
+            // 然后移除玩家
             let [succ, errMsg] = game.removePlayer(plID);
+            
             if (succ) {
                 hint += '退出游戏';
+                
+                // 保存游戏状态
+                ext.storageSet(groupKey, JSON.stringify(game));
+                
+                // 确保保存包含刚退出玩家的数据
+                ext.storageSet(playerDataKey, JSON.stringify(currentPlayerData));
             } else {
                 hint += '退出失败: ' + errMsg;
+                
+                // 正常保存游戏状态和玩家数据
+                ext.storageSet(groupKey, JSON.stringify(game));
+                
+                // 保存玩家持久化数据
+                let updatedPlayerData = game.getPlayerPersistentData();
+                ext.storageSet(playerDataKey, JSON.stringify(updatedPlayerData));
             }
-            break;
+            
+            seal.replyToSender(ctx, msg, hint);
+            return seal.ext.newCmdExecuteResult(true);
         }
         case 'start': case '开始': {
             let [succ, errMsg] = game.start();
@@ -1364,24 +1716,56 @@ cmd.solve = (ctx, msg, cmdArgs) => {
             }
             break;
         }
-        case 'newround': case '新回合': {
-            // 检查是否为当前玩家
-            if (plID !== game.toJSON().currentPlayerId) {
-                hint += '不是你的回合';
-                break;
-            }
-            
-            let [succ, errMsg] = game.newRound(plID);
-            if (succ) {
-                hint += '开始新回合';
-                hint += '\n' + game.describe();
+        case 'rule': case '规则': {
+            let ruleNum = parseInt(cmdArgs.getArgN(2));
+            if (isNaN(ruleNum)) {
+                // 显示当前规则
+                let currentRule = game.getRuleSet();
+                hint += `当前使用规则${currentRule}`;
+                if (currentRule === 1) {
+                    hint += " (原版规则)";
+                } else {
+                    hint += " (扩展规则)";
+                }
             } else {
-                hint += errMsg;
+                // 切换规则
+                let [succ, errMsg] = game.setRuleSet(ruleNum);
+                if (succ) {
+                    hint += errMsg;
+                } else {
+                    hint += `规则切换失败: ${errMsg}`;
+                }
             }
             break;
         }
+        
+        case 'rename': case '改名': {
+            let newName = cmdArgs.getArgN(2);
+            if (!newName) {
+                hint += '请指定新名字，例如 ".f rename 新名字"';
+                break;
+            }
+            
+            let [succ, errMsg] = game.changeName(plID, newName);
+            if (succ) {
+                hint += `名字修改成功: ${errMsg}`;
+            } else {
+                hint += `名字修改失败: ${errMsg}`;
+            }
+            break;
+        }
+        
         case 'status': case '查看': {
             hint = game.describe();
+            
+            // 添加当前规则信息
+            let currentRule = game.getRuleSet();
+            hint += `\n\n当前使用规则${currentRule}`;
+            if (currentRule === 1) {
+                hint += " (原版规则)";
+            } else {
+                hint += " (扩展规则)";
+            }
             break;
         }
         case 'honor': case '荣誉': {
