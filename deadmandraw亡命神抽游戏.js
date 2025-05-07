@@ -5,7 +5,7 @@
 // @description  经典的亡命神抽游戏，看谁能获得最多的宝藏！
 // @timestamp    1746622977
 // @license      Apache-2.0
-// @homepageURL  https://github.com/sealdice/javascript
+// @homepageURL  https://github.com/A1oneR/SealDice_Thing
 // ==/UserScript==
 
 // 首先检查海豹核心版本，是否支持扩展

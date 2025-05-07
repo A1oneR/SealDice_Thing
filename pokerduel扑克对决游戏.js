@@ -5,7 +5,7 @@
 // @description  基于扑克牌的对决小游戏。
 // @timestamp    1746622977
 // @license      Apache-2.0
-// @homepageURL  https://github.com/sealdice/javascript
+// @homepageURL  https://github.com/A1oneR/SealDice_Thing
 // ==/UserScript==
 
 // 首先检查是否已经加载了扩展，如果加载了则使用现有的，否则创建一个新的
