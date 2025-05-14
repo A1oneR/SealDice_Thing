@@ -5,7 +5,7 @@
 // @description  经典骰子游戏Farkle，通过投掷骰子获取分数，支持多人对战和单人模式
 // @timestamp    1746266678
 // @license      Apache-2
-// @homepageURL  https://github.com/A1oneR
+// @homepageURL  https://github.com/A1oneR/SealDice_Thing
 // ==/UserScript==
 
 const VERSION = '1.1.0';

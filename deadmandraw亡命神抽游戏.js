@@ -1,19 +1,14 @@
 // ==UserScript==
 // @name         亡命神抽 (Dead Man's Draw)
 // @author       Gemini 2.5 Pro, Air
-// @version      1.0.3
+// @version      1.0.6
 // @description  经典的亡命神抽游戏，看谁能获得最多的宝藏！
-// @timestamp    1746622977
+// @timestamp    1747227352
 // @license      Apache-2.0
 // @homepageURL  https://github.com/A1oneR/SealDice_Thing
 // ==/UserScript==
 
-// 首先检查海豹核心版本，是否支持扩展
-if (!seal.ext) {
-    throw new Error("本插件需要海豹核心版本 0.2.4alpha2 或更高版本才能运行!");
-}
-
-const VERSION = '1.0.2'; // 版本号更新
+const VERSION = '1.0.6';
 
 // 卡牌定义
 const SUIT_NAMES = {
@@ -52,26 +47,54 @@ class PlayerState {
     }
 
     removeCollectedCard(cardIdOrFullName) {
-        let suit, cardValueStr, cardFullName;
-        if (cardIdOrFullName.length <= 3 && /^[A-Z]\d$/.test(cardIdOrFullName)) { // e.g., D5
-            suit = cardIdOrFullName.slice(0, 1);
-            cardValueStr = cardIdOrFullName.slice(1);
-            cardFullName = `${SUIT_NAMES[suit]}${suit}${cardValueStr}`;
-        } else { // Full name
-            cardFullName = cardIdOrFullName;
-            suit = cardFullName.slice(-2, -1);
+        let suit, cardValue, cardFullNameToMatch;
+        const inputNormalized = cardIdOrFullName.toUpperCase();
+
+        if (inputNormalized.length <= 3 && /^[A-Z]\d$/.test(inputNormalized)) { // 是短ID，如 D5, d5
+            suit = inputNormalized.slice(0, 1);
+            cardValue = parseInt(inputNormalized.slice(1));
+            if (!SUIT_NAMES[suit]) return null; // 无效花色字母
+            cardFullNameToMatch = `${SUIT_NAMES[suit]}${suit}${cardValue}`;
+        } else { // 认为是全名，需要找到标准全名
+             // 尝试在所有可能的卡牌全名中查找（不区分大小写）
+            let foundStandardFullName = null;
+            for (const s_suit of ALL_SUITS) {
+                for (let val = 0; val <= 9; val++) { // 假设卡牌值最大到9
+                    const standardName = `${SUIT_NAMES[s_suit]}${s_suit}${val}`;
+                    if (standardName.toLowerCase() === cardIdOrFullName.toLowerCase()) {
+                        foundStandardFullName = standardName;
+                        break;
+                    }
+                }
+                if (foundStandardFullName) break;
+            }
+            if (!foundStandardFullName) return null; // 无法识别的全名
+            cardFullNameToMatch = foundStandardFullName;
+            suit = cardFullNameToMatch.slice(-2,-1);
         }
 
-        if (this.collectedCards[suit]) {
-            const index = this.collectedCards[suit].findIndex(c => c === cardFullName);
-            if (index !== -1) {
-                const removedCard = this.collectedCards[suit].splice(index, 1)[0];
+
+        if (this.collectedCards[suit] && this.collectedCards[suit].length > 0) {
+            // 规则通常要求操作顶牌，所以我们主要检查顶牌
+            if (this.collectedCards[suit][0] === cardFullNameToMatch) {
+                const removedCard = this.collectedCards[suit].shift(); // 移除第一张
                 this.totalCollectedCount--;
                 return removedCard;
+            } else {
+                 // 如果不是顶牌，但允许操作非顶牌（通常规则不允许，但以防万一）
+                 // 或者用户输入的是非顶牌的ID，这里会找不到
+                const index = this.collectedCards[suit].findIndex(c => c === cardFullNameToMatch);
+                if (index !== -1) { // 一般钩子只钩顶牌，这里作为后备
+                    // const removedCard = this.collectedCards[suit].splice(index, 1)[0];
+                    // this.totalCollectedCount--;
+                    // return removedCard;
+                    return null; // 严格按顶牌规则
+                }
             }
         }
         return null;
     }
+
 
     calculateScore() {
         let currentScore = 0;
@@ -234,7 +257,7 @@ class ShenChouGame {
         const nextIndex = (currentIndex + 1) % this.playerOrder.length;
         this.currentTurnPlayerId = this.playerOrder[nextIndex];
         this.boardCards = [];
-        this.activeEffects = {};
+        // activeEffects 清理在回合结束时或爆炸时
         this.lastActivityTime = Date.now();
     }
 
@@ -243,16 +266,24 @@ class ShenChouGame {
         return this.boardCards.some(card => card.slice(-2, -1) === newCardSuit);
     }
 
+    _isKrakenRestrictionLifted() {
+        const krakenIndex = this.boardCards.findIndex(card => card.slice(-2, -1) === 'H');
+        if (krakenIndex === -1) { 
+            return true;
+        }
+        const cardsAfterKraken = this.boardCards.length - 1 - krakenIndex;
+        return cardsAfterKraken >= 2;
+    }
+
     drawCard(userId) {
         if (this.state !== GAME_STATE.IN_PROGRESS) return "游戏未开始。";
         const player = this.getCurrentPlayer();
         if (player.userId !== userId) return "还没轮到你。";
 
-        if (this.activeEffects['M'] || this.activeEffects['T'] || this.activeEffects['D'] || this.activeEffects['P'] || this.activeEffects['G']) {
-            return "你还有卡牌效果尚未使用，请先使用效果或【不抽了】（如果海怪条件满足）。";
-        }
-        if (this.activeEffects['H'] && this.activeEffects['H'] > 0) {
-             // 海怪效果下必须抽卡
+        const isKrakenActiveAndBlocking = this.boardCards.some(card => card.slice(-2, -1) === 'H') && !this._isKrakenRestrictionLifted();
+
+        if (!isKrakenActiveAndBlocking && (this.activeEffects['M'] || this.activeEffects['T'] || this.activeEffects['D'] || this.activeEffects['P'] || this.activeEffects['G'])) {
+            return "你还有卡牌效果尚未使用，请先使用效果或【不抽了】。";
         }
 
         if (this.deckPile.length === 0) {
@@ -263,7 +294,7 @@ class ShenChouGame {
         let message = `${player.userName} 抽到了【${drawnCard}】。\n`;
         
         const exploded = this._checkBoardForExplosion(drawnCard);
-        this.boardCards.push(drawnCard);
+        this.boardCards.push(drawnCard); // 先加入甲板再判断爆炸
         message += `当前甲板: ${this.boardCards.join(', ')}\n`;
 
         if (exploded) {
@@ -272,98 +303,28 @@ class ShenChouGame {
             if (anchorIndex !== -1 && anchorIndex > 0) { 
                 let savedCount = 0;
                 for (let i = 0; i < anchorIndex; i++) {
-                    player.addCollectedCard(this.boardCards[i]);
+                    player.addCollectedCard(this.boardCards[i]); // 此处boardCards已经包含了新抽的牌
                     savedCount++;
                 }
-                message += `船锚保护了 ${savedCount} 张牌！\n`;
+                if (savedCount > 0) message += `船锚保护了 ${savedCount} 张牌！\n`;
             }
             this.discardPile.push(...this.boardCards);
+            this.activeEffects = {}; 
             this._nextTurn();
             const nextPlayer = this.getCurrentPlayer();
             message += `轮到 ${nextPlayer.userName} 行动。`;
         } else {
-            const suit = drawnCard.slice(-2, -1);
-            switch (suit) {
-                case 'M': 
-                    if (this.boardCards.length > 1) { // 至少要有两张牌才能移动非末尾的牌
-                        this.activeEffects['M'] = true; 
-                        message += "美人鱼效果：你可以选择甲板上的一张牌移到最后。\n"; 
-                    } else {
-                        message += "美人鱼出现，但甲板上只有一张牌，无需移动。\n";
-                    }
-                    break;
-                case 'T': 
-                    this.activeEffects['T'] = this.discardPile.slice(0, 3); 
-                    this.discardPile.splice(0, this.activeEffects['T'].length);
-                    if (this.activeEffects['T'].length > 0) {
-                        message += `藏宝图效果：从弃牌堆翻开 ${this.activeEffects['T'].join(', ')}。请选择一张加入甲板。\n`;
-                    } else {
-                         message += "藏宝图出现，但弃牌堆为空，无宝藏可挖。\n";
-                         delete this.activeEffects['T']; // 无效果则清除
-                    }
-                    break;
-                case 'D': // 弯刀
-                    {
-                        let canRob = false;
-                        // 检查是否有其他玩家拥有当前玩家没有的顶牌
-                        for (const otherPlayer of this.players) {
-                            if (otherPlayer.userId === player.userId) continue;
-                            for (const s in otherPlayer.collectedCards) {
-                                if (otherPlayer.collectedCards[s].length > 0 && // 对方该花色有牌
-                                    (!player.collectedCards[s] || player.collectedCards[s].length === 0) // 我方该花色无牌
-                                ) {
-                                    canRob = true;
-                                    break;
-                                }
-                            }
-                            if (canRob) break;
-                        }
-                        if (canRob) {
-                            this.activeEffects['D'] = true; 
-                            message += "弯刀效果：你可以抢夺其他玩家的一张你没有类别的顶牌。\n";
-                        } else {
-                            message += "弯刀出现，但没有可供抢夺的目标（你已拥有所有可抢类别，或无人有你没有的类别）。\n";
-                        }
-                    }
-                    break;
-                case 'G': // 钩子
-                    if (player.totalCollectedCount > 0) { // 玩家自己有战利品才能钩
-                        this.activeEffects['G'] = true; 
-                        message += "钩子效果：你可以将自己的一张战利品牌移回甲板。\n";
-                    } else {
-                        message += "钩子出现，但你没有任何战利品可以钩回。\n";
-                    }
-                    break;
-                case 'Y': this.activeEffects['Y'] = true; message += "钥匙出现了！\n"; break;
-                case 'B': this.activeEffects['B'] = true; message += "宝箱出现了！\n"; break;
-                case 'H': this.activeEffects['H'] = (this.activeEffects['H'] || 0) + 2; message += `海怪出现了！你必须再抽 ${this.activeEffects['H']} 张牌才能停牌。\n`; break;
-                case 'P': // 大炮
-                    {
-                        let canBomb = false;
-                        for (const otherPlayer of this.players) {
-                            if (otherPlayer.userId === player.userId) continue;
-                            if (otherPlayer.totalCollectedCount > 0) { // 其他玩家有战利品
-                                canBomb = true;
-                                break;
-                            }
-                        }
-                        if (canBomb) {
-                            this.activeEffects['P'] = true; 
-                            message += "大炮效果：你可以炮击其他玩家的一张顶牌。\n";
-                        } else {
-                            message += "大炮出现，但没有其他玩家有战利品可供炮击。\n";
-                        }
-                    }
-                    break;
-                case 'Z': 
-                    if (this.deckPile.length > 0) message += `占卜球效果：牌库顶的下一张牌是【${this.deckPile[0]}】。\n`;
-                    else message += "占卜球效果：牌库已空。\n";
-                    break;
-                case 'C': message += "船锚已放下！\n"; break; 
-            }
-             if (this.activeEffects['H'] && this.activeEffects['H'] > 0) {
-                this.activeEffects['H']--; 
-             }
+            // 清理上一个一次性效果（如果新牌不是同类效果）
+            const drawnSuit = drawnCard.slice(-2, -1);
+            ['M', 'T', 'D', 'G', 'P'].forEach(effSuit => {
+                if (this.activeEffects[effSuit] && drawnSuit !== effSuit) {
+                    delete this.activeEffects[effSuit];
+                }
+            });
+
+            let effectMsgObj = { text: "" };
+            this._triggerCardEffectOnBoard(drawnCard, player, effectMsgObj, true); 
+            message += effectMsgObj.text; 
         }
         this.lastActivityTime = Date.now();
         return message;
@@ -377,9 +338,14 @@ class ShenChouGame {
         if (this.activeEffects['M'] || this.activeEffects['T'] || this.activeEffects['D'] || this.activeEffects['P'] || this.activeEffects['G']) {
             return "你还有卡牌效果尚未使用，请先使用效果。";
         }
-        if (this.activeEffects['H'] && this.activeEffects['H'] > 0) {
-            return `海怪效果：你还需要抽 ${this.activeEffects['H']} 张牌才能停牌。`;
+        
+        if (this.boardCards.some(card => card.slice(-2, -1) === 'H') && !this._isKrakenRestrictionLifted()) {
+            const krakenCard = this.boardCards.find(card => card.slice(-2, -1) === 'H');
+            const krakenIndex = this.boardCards.indexOf(krakenCard);
+            const cardsNeeded = 2 - (this.boardCards.length - 1 - krakenIndex);
+            return `海怪效果：你还需要在海怪右侧再获得 ${cardsNeeded} 张牌才能停牌。`;
         }
+
         if (this.boardCards.length === 0) {
             return "甲板上没有牌，你不能停牌，请先抽卡。";
         }
@@ -394,14 +360,17 @@ class ShenChouGame {
         if (this.activeEffects['Y'] && this.activeEffects['B']) {
             const numToDraw = this.boardCards.length;
             const drawnFromDiscard = this.discardPile.splice(0, numToDraw);
-            message += `钥匙和宝箱发挥效果！从弃牌堆额外获得 ${drawnFromDiscard.join(', ')}\n`;
-            drawnFromDiscard.forEach(card => player.addCollectedCard(card));
+            if (drawnFromDiscard.length > 0) {
+                message += `钥匙和宝箱发挥效果！从弃牌堆额外获得 ${drawnFromDiscard.join(', ')}\n`;
+                drawnFromDiscard.forEach(card => player.addCollectedCard(card));
+            }
         }
         
         this.boardCards.forEach(card => player.addCollectedCard(card));
         
         message += `${player.getCollectionDescription()}\n`;
-
+        
+        this.activeEffects = {}; 
         this._nextTurn();
         const nextPlayer = this.getCurrentPlayer();
         message += `轮到 ${nextPlayer.userName} 行动。`;
@@ -409,33 +378,33 @@ class ShenChouGame {
         return message;
     }
     
-    _triggerCardEffectOnBoard(card, player, messageObj) {
+    _triggerCardEffectOnBoard(card, player, messageObj, isDirectDraw = false) {
         const suit = card.slice(-2, -1);
-        let effectTriggered = false;
+        let effectMessage = ""; 
+        const prefix = isDirectDraw ? "" : "新牌效果：";
+        
         switch (suit) {
             case 'M':
                 if (this.boardCards.length > 1) {
                     this.activeEffects['M'] = true;
-                    messageObj.text += "新牌效果：美人鱼！你可以选择甲板上的一张牌移到最后。\n";
-                    effectTriggered = true;
+                    effectMessage = prefix + "美人鱼！你可以选择甲板上的一张牌移到最后。\n";
                 } else {
-                    messageObj.text += "新牌效果：美人鱼出现，但甲板上只有一张牌，无需移动。\n";
+                    effectMessage = prefix + "美人鱼出现，但甲板上只有一张牌，无需移动。\n";
                 }
                 break;
             case 'T':
                 this.activeEffects['T'] = this.discardPile.slice(0, 3);
                 this.discardPile.splice(0, this.activeEffects['T'].length);
                 if (this.activeEffects['T'].length > 0) {
-                    messageObj.text += `新牌效果：藏宝图！从弃牌堆翻开 ${this.activeEffects['T'].join(', ')}。请选择一张加入甲板。\n`;
-                    effectTriggered = true;
+                    effectMessage = prefix + `藏宝图！从弃牌堆翻开 ${this.activeEffects['T'].join(', ')}。请选择一张加入甲板。\n`;
                 } else {
-                    messageObj.text += "新牌效果：藏宝图出现，但弃牌堆为空。\n";
+                    effectMessage = prefix + "藏宝图出现，但弃牌堆为空。\n";
                     delete this.activeEffects['T'];
                 }
                 break;
             case 'D':
                 {
-                    let canRob = false;
+                    let canRob = false; 
                     for (const otherPlayer of this.players) {
                         if (otherPlayer.userId === player.userId) continue;
                         for (const s_suit in otherPlayer.collectedCards) {
@@ -447,32 +416,28 @@ class ShenChouGame {
                     }
                     if (canRob) {
                         this.activeEffects['D'] = true;
-                        messageObj.text += "新牌效果：弯刀！你可以抢夺其他玩家的一张你没有类别的顶牌。\n";
-                        effectTriggered = true;
+                        effectMessage = prefix + "弯刀！你可以抢夺其他玩家的一张你没有类别的顶牌。\n";
                     } else {
-                        messageObj.text += "新牌效果：弯刀出现，但无合法目标。\n";
+                        effectMessage = prefix + "弯刀出现，但无合法目标。\n";
                     }
                 }
                 break;
             case 'G':
                 if (player.totalCollectedCount > 0) {
                     this.activeEffects['G'] = true;
-                    messageObj.text += "新牌效果：钩子！你可以将自己的一张战利品牌移回甲板。\n";
-                    effectTriggered = true;
+                    effectMessage = prefix + "钩子！你可以将自己的一张战利品牌移回甲板。\n";
                 } else {
-                    messageObj.text += "新牌效果：钩子出现，但你无战利品可钩。\n";
+                    effectMessage = prefix + "钩子出现，但你无战利品可钩。\n";
                 }
                 break;
-            case 'Y': this.activeEffects['Y'] = true; messageObj.text += "新牌效果：钥匙出现了！\n"; effectTriggered = true; break;
-            case 'B': this.activeEffects['B'] = true; messageObj.text += "新牌效果：宝箱出现了！\n"; effectTriggered = true; break;
-            case 'H':
-                this.activeEffects['H'] = (this.activeEffects['H'] || 0) + 2;
-                messageObj.text += `新牌效果：海怪出现了！你必须再抽 ${this.activeEffects['H']} 张牌才能停牌。\n`;
-                effectTriggered = true;
+            case 'Y': this.activeEffects['Y'] = true; effectMessage = prefix + "钥匙出现了！\n"; break;
+            case 'B': this.activeEffects['B'] = true; effectMessage = prefix + "宝箱出现了！\n"; break;
+            case 'H': 
+                effectMessage = prefix + "海怪出现了！在其右侧有两张牌前不能随意停牌。\n"; 
                 break;
             case 'P':
                 {
-                    let canBomb = false;
+                    let canBomb = false; 
                     for (const otherPlayer of this.players) {
                         if (otherPlayer.userId === player.userId) continue;
                         if (otherPlayer.totalCollectedCount > 0) {
@@ -481,33 +446,20 @@ class ShenChouGame {
                     }
                     if (canBomb) {
                         this.activeEffects['P'] = true;
-                        messageObj.text += "新牌效果：大炮！你可以炮击其他玩家的一张顶牌。\n";
-                        effectTriggered = true;
+                        effectMessage = prefix + "大炮！你可以炮击其他玩家的一张顶牌。\n";
                     } else {
-                        messageObj.text += "新牌效果：大炮出现，但无合法目标。\n";
+                        effectMessage = prefix + "大炮出现，但无合法目标。\n";
                     }
                 }
                 break;
             case 'Z':
-                if (this.deckPile.length > 0) messageObj.text += `新牌效果：占卜球！牌库顶的下一张牌是【${this.deckPile[0]}】。\n`;
-                else messageObj.text += "新牌效果：占卜球！牌库已空。\n";
-                // 占卜球不设置 activeEffect，是即时信息
+                if (this.deckPile.length > 0) effectMessage = prefix + `占卜球！牌库顶的下一张牌是【${this.deckPile[0]}】。\n`;
+                else effectMessage = prefix + "占卜球！牌库已空。\n";
                 break;
-            case 'C': messageObj.text += "新牌效果：船锚已放下！\n"; break; // 船锚不设置 activeEffect
+            case 'C': effectMessage = prefix + "船锚已放下！\n"; break; 
         }
-        // 如果海怪被触发，立即消耗一次计数 (因为这张牌的加入本身算一次“抽卡”事件)
-        if (effectTriggered && suit === 'H' && this.activeEffects['H'] && this.activeEffects['H'] > 0) {
-            // this.activeEffects['H']--; // 注释掉，因为 drawCard 中已经减了。这里的 H 是新触发的。
-            // 这里的逻辑需要小心，避免重复减 H
-        } else if (this.activeEffects['H'] && this.activeEffects['H'] > 0 && !effectTriggered && suit !== 'H'){
-            // 如果当前有海怪效果，并且这张新牌不是海怪，那么消耗一次海怪计数
-             this.activeEffects['H']--;
-             messageObj.text += `(海怪效果剩余 ${this.activeEffects['H']} 张)\n`;
-        }
-
-
+        messageObj.text += effectMessage;
     }
-
 
     useCardEffect(userId, effectType, ...args) {
         if (this.state !== GAME_STATE.IN_PROGRESS) return "游戏未开始。";
@@ -515,53 +467,70 @@ class ShenChouGame {
         if (player.userId !== userId) return "还没轮到你或效果不属于你。";
 
         let message = "";
-        let messageObj = { text: "" }; // 用于传递给 _triggerCardEffectOnBoard
-        let targetCardIdOrName, targetPlayerId, targetPlayer;
-        let newEffectiveCard = null; // 记录通过效果加入甲板的牌
+        let messageObj = { text: "" }; 
+        let targetInput, targetPlayerId, targetPlayer; 
+        let newEffectiveCard = null; 
 
         switch(effectType) {
             case 'M': 
                 if (!this.activeEffects['M']) return "美人鱼效果未激活。";
-                targetCardIdOrName = args[0]; 
-                const cardIndex = this.boardCards.findIndex(c => c === targetCardIdOrName);
-                if (cardIndex === -1) return "指定的牌不在甲板上。";
-                if (cardIndex === this.boardCards.length - 1) return "指定的牌已在末尾。";
+                targetInput = args[0]; 
+                if (!targetInput) return "请输入要移动的卡牌。";
                 
-                const [movedCard] = this.boardCards.splice(cardIndex, 1);
-                this.boardCards.push(movedCard);
-                delete this.activeEffects['M'];
-                message = `${player.userName} 使用美人鱼将【${movedCard}】移到了甲板末尾。\n当前甲板: ${this.boardCards.join(', ')}\n`;
-                newEffectiveCard = movedCard; // 美人鱼移动后，这张牌成为新的“顶牌”
+                let cardToMove = null;
+                let originalCardIndex = -1;
+                const targetInputUpperM = targetInput.toUpperCase();
+
+                if (targetInputUpperM.length <=3 && /^[A-Z]\d$/.test(targetInputUpperM)) {
+                    const shortSuit = targetInputUpperM.slice(0,1);
+                    const shortVal = targetInputUpperM.slice(1);
+                    originalCardIndex = this.boardCards.findIndex(c => c.slice(-2, -1) === shortSuit && c.slice(-1) === shortVal);
+                }
+                
+                if (originalCardIndex === -1) { 
+                    originalCardIndex = this.boardCards.findIndex(c => c.toLowerCase() === targetInput.toLowerCase());
+                }
+
+                if (originalCardIndex === -1) return `指定的牌【${targetInput}】不在甲板上。`;
+                if (originalCardIndex === this.boardCards.length - 1) return "指定的牌已在末尾。";
+                
+                cardToMove = this.boardCards.splice(originalCardIndex, 1)[0];
+                this.boardCards.push(cardToMove);
+                delete this.activeEffects['M']; // 效果已使用
+                message = `${player.userName} 使用美人鱼将【${cardToMove}】移到了甲板末尾。\n当前甲板: ${this.boardCards.join(', ')}\n`;
+                newEffectiveCard = cardToMove; 
                 break;
 
             case 'T': 
                 if (!this.activeEffects['T'] || this.activeEffects['T'].length === 0) return "藏宝图效果未激活或无牌可选。";
-                targetCardIdOrName = args[0]; 
+                targetInput = args[0]; 
+                if (!targetInput) return "请输入要选择的卡牌。";
                 
                 let choiceIndex = -1;
-                let chosenCardFromOptions = null;
+                const targetInputTUpper = targetInput.toUpperCase();
 
-                if (targetCardIdOrName.length <= 3 && /^[A-Z]\d$/.test(targetCardIdOrName)) { 
-                    const targetSuitShort = targetCardIdOrName.slice(0, 1);
-                    const targetValueShort = targetCardIdOrName.slice(1);
-                    choiceIndex = this.activeEffects['T'].findIndex(c => c.slice(-2) === `${targetSuitShort}${targetValueShort}`);
+                if (targetInputTUpper.length <= 3 && /^[A-Z]\d$/.test(targetInputTUpper)) { 
+                    const targetSuitShort = targetInputTUpper.slice(0, 1);
+                    const targetValueShort = targetInputTUpper.slice(1);
+                    choiceIndex = this.activeEffects['T'].findIndex(c => c.slice(-2, -1) === targetSuitShort && c.slice(-1) === targetValueShort);
                 } else { 
-                    choiceIndex = this.activeEffects['T'].indexOf(targetCardIdOrName);
+                    choiceIndex = this.activeEffects['T'].findIndex(c => c.toLowerCase() === targetInput.toLowerCase());
                 }
 
-                if (choiceIndex === -1) return `指定的牌【${targetCardIdOrName}】不在藏宝图选项中。选项: ${this.activeEffects['T'].join(', ')}`;
+                if (choiceIndex === -1) return `指定的牌【${targetInput}】不在藏宝图选项中。选项: ${this.activeEffects['T'].join(', ')}`;
                 
-                chosenCardFromOptions = this.activeEffects['T'].splice(choiceIndex, 1)[0];
+                const chosenCardFromOptions = this.activeEffects['T'].splice(choiceIndex, 1)[0];
                 this.discardPile.push(...this.activeEffects['T']); 
                 
                 const exploded = this._checkBoardForExplosion(chosenCardFromOptions);
                 this.boardCards.push(chosenCardFromOptions);
-                delete this.activeEffects['T'];
+                delete this.activeEffects['T']; // 效果已使用
 
                 message = `${player.userName} 从藏宝图中选择了【${chosenCardFromOptions}】加入甲板。\n当前甲板: ${this.boardCards.join(', ')}\n`;
                 if (exploded) {
                     message += `💥 爆炸了！回合结束。\n`;
                     this.discardPile.push(...this.boardCards);
+                    this.activeEffects = {};
                     this._nextTurn();
                     const nextPlayer = this.getCurrentPlayer();
                     message += `轮到 ${nextPlayer.userName} 行动。`;
@@ -572,14 +541,19 @@ class ShenChouGame {
             
             case 'D': 
                 if (!this.activeEffects['D']) return "弯刀效果未激活。";
-                targetCardIdOrName = args[0]; 
+                targetInput = args[0]; 
                 targetPlayerId = args[1]; 
                 targetPlayer = this.getPlayer(targetPlayerId); 
                 if (!targetPlayer || targetPlayer.userId === player.userId) return "无效的目标玩家或不能以自己为目标。";
+                if (!targetInput) return "请输入要抢夺的卡牌ID。";
 
-                const targetSuit = targetCardIdOrName.slice(0, 1); 
-                const targetValue = parseInt(targetCardIdOrName.slice(1));
-                if (isNaN(targetValue)) return `目标卡牌ID格式错误: ${targetCardIdOrName}。应为 字母+数字，如P3。`;
+                const targetInputDUpper = targetInput.toUpperCase();
+                if (!(targetInputDUpper.length <=3 && /^[A-Z]\d$/.test(targetInputDUpper))) {
+                     return `目标卡牌ID【${targetInput}】格式错误。应为 字母+数字，如P3。`;
+                }
+
+                const targetSuit = targetInputDUpper.slice(0, 1); 
+                const targetValue = parseInt(targetInputDUpper.slice(1));
                 const fullTargetCardName = `${SUIT_NAMES[targetSuit]}${targetSuit}${targetValue}`;
 
                 if (player.collectedCards[targetSuit] && player.collectedCards[targetSuit].length > 0) {
@@ -590,16 +564,17 @@ class ShenChouGame {
                     return `${targetPlayer.userName} 没有这张顶牌【${fullTargetCardName}】或该类别无牌。`;
                 }
 
-                const stolenCard = targetPlayer.removeCollectedCard(fullTargetCardName);
+                const stolenCard = targetPlayer.removeCollectedCard(fullTargetCardName); 
                 if (!stolenCard) return `无法从 ${targetPlayer.userName} 处抢夺【${fullTargetCardName}】。`;
 
                 const d_exploded = this._checkBoardForExplosion(stolenCard);
                 this.boardCards.push(stolenCard);
-                delete this.activeEffects['D'];
+                delete this.activeEffects['D']; // 效果已使用
                 message = `${player.userName} 用弯刀从 ${targetPlayer.userName} 处抢夺了【${stolenCard}】到甲板！\n当前甲板: ${this.boardCards.join(', ')}\n`;
                 if (d_exploded) {
                      message += `💥 爆炸了！回合结束。\n`;
                     this.discardPile.push(...this.boardCards);
+                    this.activeEffects = {};
                     this._nextTurn();
                     const nextPlayer = this.getCurrentPlayer();
                     message += `轮到 ${nextPlayer.userName} 行动。`;
@@ -610,23 +585,31 @@ class ShenChouGame {
 
             case 'G': 
                 if (!this.activeEffects['G']) return "钩子效果未激活。";
-                targetCardIdOrName = args[0]; 
-                const hookSuit = targetCardIdOrName.slice(0,1);
-                const hookValue = parseInt(targetCardIdOrName.slice(1));
-                if (isNaN(hookValue)) return `目标卡牌ID格式错误: ${targetCardIdOrName}。应为 字母+数字，如Y7。`;
+                targetInput = args[0]; 
+                if (!targetInput) return "请输入要钩取的卡牌ID。";
+
+                const targetInputGUpper = targetInput.toUpperCase();
+                 if (!(targetInputGUpper.length <=3 && /^[A-Z]\d$/.test(targetInputGUpper))) {
+                     return `目标卡牌ID【${targetInput}】格式错误。应为 字母+数字，如Y7。`;
+                }
+
+                const hookSuit = targetInputGUpper.slice(0,1);
+                // const hookValue = parseInt(targetInputGUpper.slice(1)); // hookValue主要用于构建全名提示
                 
-                const hookedCard = player.removeCollectedCard(targetCardIdOrName); 
+                const hookedCard = player.removeCollectedCard(targetInputGUpper); 
                 if (!hookedCard) {
-                     return `你没有这张战利品【${SUIT_NAMES[hookSuit]}${hookSuit}${hookValue}】或它不是该类别的顶牌。`;
+                     // removeCollectedCard 已经处理了顶牌逻辑
+                     return `你没有这张战利品【${SUIT_NAMES[hookSuit]}${targetInputGUpper}】或它不是该类别的顶牌。`;
                 }
 
                 const g_exploded = this._checkBoardForExplosion(hookedCard);
                 this.boardCards.push(hookedCard);
-                delete this.activeEffects['G'];
+                delete this.activeEffects['G']; // 效果已使用
                 message = `${player.userName} 用钩子将自己的【${hookedCard}】移回甲板！\n当前甲板: ${this.boardCards.join(', ')}\n`;
                  if (g_exploded) {
                      message += `💥 爆炸了！回合结束。\n`;
                     this.discardPile.push(...this.boardCards);
+                    this.activeEffects = {};
                     this._nextTurn();
                     const nextPlayer = this.getCurrentPlayer();
                     message += `轮到 ${nextPlayer.userName} 行动。`;
@@ -637,14 +620,19 @@ class ShenChouGame {
 
             case 'P': 
                 if (!this.activeEffects['P']) return "大炮效果未激活。";
-                targetCardIdOrName = args[0]; 
+                targetInput = args[0]; 
                 targetPlayerId = args[1]; 
                 targetPlayer = this.getPlayer(targetPlayerId);
                 if (!targetPlayer || targetPlayer.userId === player.userId) return "无效的目标玩家或不能以自己为目标。";
+                if (!targetInput) return "请输入要炮击的卡牌ID。";
 
-                const cannonSuit = targetCardIdOrName.slice(0, 1);
-                const cannonValue = parseInt(targetCardIdOrName.slice(1));
-                if (isNaN(cannonValue)) return `目标卡牌ID格式错误: ${targetCardIdOrName}。应为 字母+数字，如B6。`;
+                const targetInputPUpper = targetInput.toUpperCase();
+                if (!(targetInputPUpper.length <=3 && /^[A-Z]\d$/.test(targetInputPUpper))) {
+                     return `目标卡牌ID【${targetInput}】格式错误。应为 字母+数字，如B6。`;
+                }
+
+                const cannonSuit = targetInputPUpper.slice(0, 1);
+                const cannonValue = parseInt(targetInputPUpper.slice(1));
                 const fullCannonCardName = `${SUIT_NAMES[cannonSuit]}${cannonSuit}${cannonValue}`;
 
                 if (!targetPlayer.collectedCards[cannonSuit] || targetPlayer.collectedCards[cannonSuit].length === 0 ||
@@ -652,22 +640,20 @@ class ShenChouGame {
                     return `${targetPlayer.userName} 没有这张顶牌【${fullCannonCardName}】或该类别无牌。`;
                 }
                 
-                const destroyedCard = targetPlayer.removeCollectedCard(fullCannonCardName);
+                const destroyedCard = targetPlayer.removeCollectedCard(fullCannonCardName); 
                 if (!destroyedCard) return `无法从 ${targetPlayer.userName} 处破坏【${fullCannonCardName}】。`;
 
                 this.discardPile.push(destroyedCard);
-                delete this.activeEffects['P'];
+                delete this.activeEffects['P']; // 效果已使用
                 message = `${player.userName} 用大炮摧毁了 ${targetPlayer.userName} 的【${destroyedCard}】！`;
-                // 大炮不产生新的甲板牌，所以 newEffectiveCard 为 null
                 break;
             default: return "未知的卡牌效果类型。";
         }
 
-        // 如果有新牌加入甲板且未爆炸，则触发其效果
         if (newEffectiveCard) {
-            messageObj.text = ""; // 清空，准备接收新效果文本
-            this._triggerCardEffectOnBoard(newEffectiveCard, player, messageObj);
-            message += messageObj.text; // 追加新效果文本
+            messageObj.text = ""; 
+            this._triggerCardEffectOnBoard(newEffectiveCard, player, messageObj, false); 
+            message += messageObj.text; 
         }
 
         this.lastActivityTime = Date.now();
@@ -721,7 +707,7 @@ class ShenChouGame {
     getGameStatus() {
         if (this.state === GAME_STATE.IDLE) return "当前没有亡命神抽游戏。";
         if (this.state === GAME_STATE.WAITING) {
-            return `亡命神抽游戏等待开始，发起人: ${this.getPlayer(this.gameInitiatorId)?.userName || '未知'}。\n已加入玩家 (${this.players.length}/5): ${this.players.map(p=>p.userName).join(', ')}\n请发起人输入【开始】以开始游戏。`;
+            return `亡命神抽游戏等待开始，发起人: ${this.getPlayer(this.gameInitiatorId)?.userName || '未知'}。\n已加入玩家 (${this.players.length}/5): ${this.players.map(p=>p.userName).join(', ')}\n请发起人输入【.dmd 开始】以开始游戏。`;
         }
         
         let status = `--- 亡命神抽进行中 ---\n`;
@@ -730,26 +716,30 @@ class ShenChouGame {
         status += `当前回合: ${currentPlayer.userName}\n`;
         status += `甲板: ${this.boardCards.length > 0 ? this.boardCards.join(', ') : '(空)'}\n`;
         
-        if (Object.keys(this.activeEffects).length > 0) {
-            status += "激活效果: ";
-            if (this.activeEffects['M']) status += "美人鱼 ";
-            if (this.activeEffects['T']) status += `藏宝图(${this.activeEffects['T'].join('/')}) `;
-            if (this.activeEffects['D']) status += "弯刀 ";
-            if (this.activeEffects['P']) status += "大炮 ";
-            if (this.activeEffects['G']) status += "钩子 ";
-            if (this.activeEffects['Y']) status += "钥匙 ";
-            if (this.activeEffects['B']) status += "宝箱 ";
-            if (this.activeEffects['H'] && this.activeEffects['H'] > 0) status += `海怪(还需${this.activeEffects['H']}张) `;
-            status += "\n";
+        if (this.boardCards.some(card => card.slice(-2, -1) === 'H') && !this._isKrakenRestrictionLifted()) {
+            status += "海怪效果生效中！在其右侧有两张牌前不能随意停牌。\n";
+        }
+
+        let activeEffectDescriptions = [];
+        if (this.activeEffects['M']) activeEffectDescriptions.push("美人鱼");
+        if (this.activeEffects['T']) activeEffectDescriptions.push(`藏宝图(${this.activeEffects['T'].join('/')})`);
+        if (this.activeEffects['D']) activeEffectDescriptions.push("弯刀");
+        if (this.activeEffects['P']) activeEffectDescriptions.push("大炮");
+        if (this.activeEffects['G']) activeEffectDescriptions.push("钩子");
+        if (this.activeEffects['Y']) activeEffectDescriptions.push("钥匙");
+        if (this.activeEffects['B']) activeEffectDescriptions.push("宝箱");
+        
+        if(activeEffectDescriptions.length > 0) {
+            status += "等待使用效果: " + activeEffectDescriptions.join(', ') + "\n";
         }
         return status;
     }
 }
 
 // 初始化扩展
-let ext = seal.ext.find('亡命神抽'); // 扩展名保持不变，只是指令变化
+let ext = seal.ext.find('亡命神抽'); 
 if (!ext) {
-    ext = seal.ext.new('亡命神抽', '游戏作者/AI', VERSION);
+    ext = seal.ext.new('亡命神抽', 'Gemini 2.5 Pro, Air', VERSION);
     seal.ext.register(ext);
 } else {
     ext.version = VERSION; 
@@ -787,13 +777,13 @@ class PlayerOverallStats {
 }
 
 
-const cmdDMD = seal.ext.newCmdItemInfo(); // 修改指令对象名
-cmdDMD.name = 'dmd'; // 主指令修改
-cmdDMD.aliases = []; // 移除旧别名
+const cmdDMD = seal.ext.newCmdItemInfo(); 
+cmdDMD.name = 'dmd'; 
+cmdDMD.aliases = []; 
 cmdDMD.help = `亡命神抽游戏指令 (.dmd):
 .dmd 发起/加入/开始/抽卡/不抽了/状态/查看战利品/结束
-卡牌效果指令 (在提示后使用):
-  .dmd 移动 <甲板牌全名如美人鱼M1> (美人鱼)
+卡牌效果指令 (在提示后使用, 卡牌ID/名称不区分大小写):
+  .dmd 移动 <甲板牌ID如M1或全名> (美人鱼)
   .dmd 挖宝 <弃牌堆牌ID如D5或全名> (藏宝图)
   .dmd 抢劫 <目标牌ID如P3> @玩家 (弯刀)
   .dmd 钩取 <自己战利品牌ID如Y7> (钩子)
@@ -804,10 +794,17 @@ cmdDMD.disabledInPrivate = true;
 cmdDMD.allowDelegate = true; 
 
 cmdDMD.solve = (ctx, msg, cmdArgs) => {
-    const groupCtxKey = `wmshenchou_game:${ctx.group.groupId}`; // 存储键名保持，避免数据丢失
+    const groupCtxKey = `wmshenchou_game:${ctx.group.groupId}`; 
     let game = new ShenChouGame(ext.storageGet(groupCtxKey));
     
-    const subCmd = cmdArgs.getArgN(1).toLowerCase();
+    const subCmdRaw = cmdArgs.getArgN(1);
+    if (!subCmdRaw) { 
+        const ret = seal.ext.newCmdExecuteResult(true);
+        ret.showHelp = true;
+        return ret;
+    }
+    const subCmd = subCmdRaw.toLowerCase();
+
     const player = { id: ctx.player.userId, name: ctx.player.name };
     let reply = "";
 
@@ -849,7 +846,7 @@ cmdDMD.solve = (ctx, msg, cmdArgs) => {
             break;
         case '抽卡':
             reply = game.drawCard(player.id);
-            if (typeof reply === 'object' && reply.summary) {
+            if (typeof reply === 'object' && reply.summary) { // 游戏因抽光牌库结束
                 reply.playerStatsData.forEach(pData => {
                     const statsKey = `wmshenchou_stats:${pData.userId}`;
                     let playerStats = new PlayerOverallStats();
@@ -899,7 +896,7 @@ cmdDMD.solve = (ctx, msg, cmdArgs) => {
             }
             break;
         case '移动': 
-            reply = game.useCardEffect(player.id, 'M', cmdArgs.getArgN(2));
+            reply = game.useCardEffect(player.id, 'M', cmdArgs.getArgN(2)); 
             break;
         case '挖宝': 
             reply = game.useCardEffect(player.id, 'T', cmdArgs.getArgN(2));
@@ -951,7 +948,8 @@ cmdDMD.solve = (ctx, msg, cmdArgs) => {
                 let targetPlayerId = player.id;
                 let targetPlayerName = player.name;
                 const mentionedPlayerCtx = seal.getCtxProxyFirst(ctx, cmdArgs);
-                if (mentionedPlayerCtx && cmdArgs.getArgN(2).startsWith('@')) { 
+                // 检查第二个参数是否是@提及，并且它不是唯一的参数 (避免 .dmd 战绩 @自己 时误判)
+                if (mentionedPlayerCtx && cmdArgs.getArgN(2) && cmdArgs.getArgN(2).startsWith('@')) { 
                     targetPlayerId = mentionedPlayerCtx.player.userId;
                     targetPlayerName = mentionedPlayerCtx.player.name;
                 }
@@ -981,4 +979,4 @@ cmdDMD.solve = (ctx, msg, cmdArgs) => {
 };
 
 // 注册命令
-ext.cmdMap['dmd'] = cmdDMD; // 修改注册的指令名
+ext.cmdMap['dmd'] = cmdDMD; 
