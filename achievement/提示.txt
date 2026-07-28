@@ -1,0 +1,10 @@
+注意字体问题：
+Python 脚本中的 msyh.ttc 是微软雅黑。如果你在 Linux 服务器上运行，请通过 fc-list :lang=zh 查看你系统里的中文字体路径，并替换脚本中的字体名。
+
+记得先安装
+pip install flask playwright
+playwright install chromium
+
+脚本默认使用10000端口，有冲突自行调换
+
+更新了自定义颜色功能，参考帮助提示，优化了性能。
