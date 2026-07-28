@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         骰娘好感度（小游戏合集）
 // @author       Codex, Air
-// @version      1.22.0
-// @description  包含德州扑克、RE7二十一点、亡命神抽、Farkle、爱赢一切、钓鱼、竞拍之王、签到、投喂与排行榜的养成小游戏合集。
+// @version      1.23.1
+// @description  包含德州扑克、RE7二十一点、亡命神抽、Farkle、爱赢一切、视频扑克、钓鱼、竞拍之王、签到、投喂与排行榜的养成小游戏合集。
 // @timestamp    1784995200
 // @license      Apache-2.0
 // @sealVersion  1.4.5
@@ -12,7 +12,7 @@
   'use strict';
 
   const EXT_NAME = '骰娘好感度（小游戏合集）';
-  const VERSION = '1.22.0';
+  const VERSION = '1.23.1';
   const BOT_PREFIX = 'AFF-BOT:';
   const ENTRY = { poker: 150, blackjack: 100, dmd: 100, farkle: 100, love: 100 };
   const GAME_NAMES = {
@@ -272,6 +272,10 @@
       auctionPasses: 0, auctionTopItem: null, auctionVenueStats: {},
       lotteryTickets: 0, lotteryWins: 0, lotterySpent: 0, lotteryPrize: 0, lotteryBestPrize: 0,
       deathDicePlays: 0, deathDiceWins: 0, deathDiceLosses: 0, deathDiceProfit: 0, deathDiceBestWin: 0,
+      videoPokerPlays: 0, videoPokerHands: 0, videoPokerHandsWon: 0, videoPokerWagered: 0, videoPokerWon: 0,
+      videoPokerBestPayout: 0, videoPokerBestHand: '', videoPokerBestHandRank: 0,
+      videoPokerHighLowWins: 0, videoPokerBestStreak: 0, videoPokerRevives: 0,
+      videoPokerJackpots: 0, videoPokerJackpotWon: 0,
       loveRoundsWon: 0, loveWinsAll: 0, loveCheatWins: 0, loveCheatLosses: 0, loveCheatPenalties: 0,
       loveBestChips: 0, loveBestHandRank: 0, loveBestHand: ''
     };
@@ -3046,10 +3050,11 @@
   }
   function scratchMenuView(quote) {
     return {
-      kind: 'scratch', title: '骰娘彩票与风险游戏', subtitle: '即开票 · 每日双色球 · 生死骰 · 九出十三归',
+      kind: 'scratch', title: '骰娘彩票与风险游戏', subtitle: '即开票 · 视频扑克 · 每日双色球 · 生死骰 · 九出十三归',
       lines: [
         '.刮刮 买 [面额] [类型]  |  .刮刮 刮开',
         '.yan 刮刮 买 [面额] [类型]  |  完整写法同样有效',
+        '.刮刮 扑克 10/30/50  |  .视频扑克 10/30/50',
         '.双色球 [5个红球] [1个蓝球]  |  .双色球 兑奖/状态/历史',
         '.生死骰 简单/困难  |  押上全部游戏币',
         '.借款 申请  |  余额低于150时可借150，应还195',
@@ -3180,6 +3185,296 @@
       `下一笔将扣好感 ${nextPenalty}  |  累计借入 ${loan.totalBorrowed}  |  累计归还 ${loan.totalRepaid}`
     ];
     return { kind: 'scratch', title: '骰娘借款处', subtitle: '九出十三归 · 到手150 · 每笔应还195', loanScene: scene, lines, quote: details && details.quote ? details.quote : '' };
+  }
+
+  // -------------------- 视频扑克 --------------------
+  const VIDEO_POKER_BETS = [10, 30, 50];
+  const VIDEO_POKER_JACKPOT_KEY = 'aff.videoPoker.jackpot.v1';
+  const VIDEO_POKER_JACKS_PAYTABLE = [
+    { key: 'royal', label: '皇家同花顺', multiplier: 600, rank: 100 },
+    { key: 'straight_flush', label: '同花顺', multiplier: 37.5, rank: 90 },
+    { key: 'four_kind', label: '四条', multiplier: 18.75, rank: 80 },
+    { key: 'full_house', label: '葫芦', multiplier: 6.75, rank: 70 },
+    { key: 'flush', label: '同花', multiplier: 4.5, rank: 60 },
+    { key: 'straight', label: '顺子', multiplier: 3, rank: 50 },
+    { key: 'three_kind', label: '三条', multiplier: 2.25, rank: 40 },
+    { key: 'two_pair', label: '两对', multiplier: 1.5, rank: 30 },
+    { key: 'jacks_or_better', label: 'J或更好', multiplier: 0.75, rank: 20 }
+  ];
+  const VIDEO_POKER_DEUCES_PAYTABLE = [
+    { key: 'natural_royal', label: '天然皇家同花顺', multiplier: 595, rank: 110 },
+    { key: 'four_deuces', label: '四张2', multiplier: 149, rank: 105 },
+    { key: 'wild_royal', label: '狂野皇家同花顺', multiplier: 18.5, rank: 100 },
+    { key: 'five_kind', label: '五条', multiplier: 11.25, rank: 90 },
+    { key: 'straight_flush', label: '同花顺', multiplier: 6.75, rank: 80 },
+    { key: 'four_kind', label: '四条', multiplier: 3.75, rank: 70 },
+    { key: 'full_house', label: '葫芦', multiplier: 2.25, rank: 60 },
+    { key: 'flush', label: '同花', multiplier: 1.5, rank: 50 },
+    { key: 'straight', label: '顺子', multiplier: 1.5, rank: 40 },
+    { key: 'three_kind', label: '三条', multiplier: 0.75, rank: 30 }
+  ];
+  function videoPokerRound(value) { return Math.round(Math.max(0, Number(value) || 0) * 100) / 100; }
+  function videoPokerSessionKey(id) { return `aff.videoPoker.session.v1:${encodeURIComponent(id)}`; }
+  function videoPokerJackpot() {
+    const stored = jsonGet(VIDEO_POKER_JACKPOT_KEY, null);
+    if (stored === null || !Number.isFinite(Number(stored)) || Number(stored) < 0) {
+      jsonSet(VIDEO_POKER_JACKPOT_KEY, 1000);
+      return 1000;
+    }
+    return videoPokerRound(Number(stored));
+  }
+  function videoPokerSetJackpot(value) {
+    const amount = videoPokerRound(value); jsonSet(VIDEO_POKER_JACKPOT_KEY, amount); return amount;
+  }
+  function videoPokerFundJackpot(wager) {
+    return videoPokerSetJackpot(videoPokerJackpot() + Math.max(0, Number(wager) || 0) * 0.1);
+  }
+  function videoPokerVariant(stake) { return stake === 30 ? '狂野的2' : stake === 50 ? '五手扑克' : 'J或更好'; }
+  function videoPokerPaytable(stake) { return stake === 30 ? VIDEO_POKER_DEUCES_PAYTABLE : VIDEO_POKER_JACKS_PAYTABLE; }
+  function videoPokerPayRow(table, key) {
+    for (let i = 0; i < table.length; i++) if (table[i].key === key) return table[i];
+    return null;
+  }
+  function videoPokerCardValue(card) {
+    if (card && Number.isFinite(Number(card.value))) return clamp(int(card.value, 0), 2, 14);
+    const index = POKER_RANKS.indexOf(String(card && card.rank || ''));
+    return index >= 0 ? index + 2 : 2;
+  }
+  function videoPokerCard(card) {
+    if (!card) return { suit: 'S', rank: '2', value: 2 };
+    const value = videoPokerCardValue(card); const suit = POKER_SUITS.indexOf(card.suit) >= 0 ? card.suit : 'S';
+    return { suit, rank: POKER_RANKS[value - 2], value };
+  }
+  function videoPokerStraightPossible(cards, wilds, sameSuit) {
+    const naturals = cards.filter((card) => card.value !== 2);
+    if (sameSuit && naturals.some((card) => card.suit !== sameSuit)) return false;
+    const values = naturals.map((card) => card.value); if (new Set(values).size !== values.length) return false;
+    const sequences = [[14, 5, 4, 3, 2]];
+    for (let high = 6; high <= 14; high++) sequences.push([high, high - 1, high - 2, high - 3, high - 4]);
+    return sequences.some((sequence) => values.every((value) => sequence.indexOf(value) >= 0) && sequence.filter((value) => values.indexOf(value) < 0).length <= wilds);
+  }
+  function videoPokerDeucesResult(rawCards) {
+    const cards = rawCards.map(videoPokerCard); const wilds = cards.filter((card) => card.value === 2).length;
+    const naturals = cards.filter((card) => card.value !== 2); const table = VIDEO_POKER_DEUCES_PAYTABLE;
+    const counts = {}; naturals.forEach((card) => { counts[card.value] = (counts[card.value] || 0) + 1; });
+    const countValues = Object.keys(counts).map((key) => counts[key]); const maxCount = countValues.length ? Math.max.apply(null, countValues) : 0;
+    const sameSuit = naturals.length ? naturals[0].suit : 'S'; const flushPossible = naturals.every((card) => card.suit === sameSuit);
+    const royal = [10, 11, 12, 13, 14]; const royalValues = naturals.map((card) => card.value);
+    const royalPossible = flushPossible && new Set(royalValues).size === royalValues.length && royalValues.every((value) => royal.indexOf(value) >= 0) && royal.filter((value) => royalValues.indexOf(value) < 0).length <= wilds;
+    let key = '';
+    if (!wilds && royalPossible) key = 'natural_royal';
+    else if (wilds === 4) key = 'four_deuces';
+    else if (wilds > 0 && royalPossible) key = 'wild_royal';
+    else if (maxCount + wilds >= 5) key = 'five_kind';
+    else if (flushPossible && videoPokerStraightPossible(cards, wilds, sameSuit)) key = 'straight_flush';
+    else if (maxCount + wilds >= 4) key = 'four_kind';
+    else {
+      let fullHouse = false;
+      for (let trip = 3; trip <= 14 && !fullHouse; trip++) for (let pair = 3; pair <= 14 && !fullHouse; pair++) {
+        if (trip === pair) continue;
+        const tripCount = counts[trip] || 0; const pairCount = counts[pair] || 0;
+        const outside = naturals.length - tripCount - pairCount;
+        if (!outside && tripCount <= 3 && pairCount <= 2 && (3 - tripCount) + (2 - pairCount) === wilds) fullHouse = true;
+      }
+      if (fullHouse) key = 'full_house';
+      else if (flushPossible) key = 'flush';
+      else if (videoPokerStraightPossible(cards, wilds, '')) key = 'straight';
+      else if (maxCount + wilds >= 3) key = 'three_kind';
+    }
+    const row = videoPokerPayRow(table, key);
+    return row ? { key, name: row.label, multiplier: row.multiplier, rank: row.rank } : { key: 'none', name: '未成牌', multiplier: 0, rank: 0 };
+  }
+  function videoPokerJacksResult(rawCards) {
+    const cards = rawCards.map(videoPokerCard); const evaluated = evaluateFive(cards); let key = '';
+    if (evaluated.category === 8) key = evaluated.tie[0] === 14 ? 'royal' : 'straight_flush';
+    else if (evaluated.category === 7) key = 'four_kind';
+    else if (evaluated.category === 6) key = 'full_house';
+    else if (evaluated.category === 5) key = 'flush';
+    else if (evaluated.category === 4) key = 'straight';
+    else if (evaluated.category === 3) key = 'three_kind';
+    else if (evaluated.category === 2) key = 'two_pair';
+    else if (evaluated.category === 1 && evaluated.tie[0] >= 11) key = 'jacks_or_better';
+    const row = videoPokerPayRow(VIDEO_POKER_JACKS_PAYTABLE, key);
+    if (row) return { key, name: row.label, multiplier: row.multiplier, rank: row.rank };
+    return { key: 'none', name: evaluated.category === 1 ? 'J以下对子' : evaluated.name, multiplier: 0, rank: 0 };
+  }
+  function videoPokerEvaluate(cards, stake) { return stake === 30 ? videoPokerDeucesResult(cards) : videoPokerJacksResult(cards); }
+  function videoPokerReviveCost(pendingPrize) { return Math.max(1, Math.ceil(Math.max(0, Number(pendingPrize) || 0) / 2)); }
+  function videoPokerParsePositions(tokens, keepMode) {
+    const raw = (tokens || []).join(' ').trim();
+    if (['全部', '全留', '全换', '全部换', 'all'].indexOf(raw.toLowerCase()) >= 0) return [1, 2, 3, 4, 5];
+    if (['不留', 'none'].indexOf(raw.toLowerCase()) >= 0) return keepMode ? [] : [1, 2, 3, 4, 5];
+    const numbers = raw.match(/\d+/g) || []; if (!numbers.length) return null;
+    const positions = numbers.map((value) => int(value, 0)); if (positions.some((value) => value < 1 || value > 5)) return null;
+    return Array.from(new Set(positions)).sort((a, b) => a - b);
+  }
+  function videoPokerCreateSession(id, stake) {
+    const deck = pokerDeck(); const initialHand = [];
+    for (let i = 0; i < 5; i++) initialHand.push(deck.pop());
+    return {
+      version: 1, ownerId: id, stake, variant: videoPokerVariant(stake), phase: 'deal',
+      initialHand, hand: initialHand.slice(), held: [false, false, false, false, false], deck,
+      hands: [], results: [], totalPayout: 0, pendingPrize: 0, streak: 0,
+      anchorCard: null, previousCard: null, drawnCard: null, guess: '', correct: null,
+      reviveCost: 0, handsRecorded: false, finalized: false, createdAt: nowMs(), updatedAt: nowMs()
+    };
+  }
+  function videoPokerDrawHand(initialHand, held, deck) {
+    const hand = initialHand.map(videoPokerCard);
+    for (let index = 0; index < 5; index++) if (!held[index]) hand[index] = videoPokerCard(deck.pop());
+    return hand;
+  }
+  function videoPokerCompleteDraw(session) {
+    const hands = [];
+    if (session.stake === 50) {
+      for (let index = 0; index < 5; index++) hands.push(videoPokerDrawHand(session.initialHand, session.held, shuffle(session.deck.slice())));
+    } else {
+      hands.push(videoPokerDrawHand(session.initialHand, session.held, session.deck));
+      session.deck = session.deck.map(videoPokerCard);
+    }
+    const baseStake = session.stake === 50 ? 10 : session.stake;
+    const results = hands.map((hand) => videoPokerEvaluate(hand, session.stake));
+    const payouts = results.map((result) => videoPokerRound(baseStake * result.multiplier));
+    session.hands = hands; session.hand = hands[0]; session.results = results; session.handPayouts = payouts;
+    session.totalPayout = videoPokerRound(payouts.reduce((sum, value) => sum + value, 0));
+    session.pendingPrize = session.totalPayout; session.phase = session.stake === 10 && session.totalPayout > 0 ? 'offer' : 'complete';
+    session.updatedAt = nowMs(); return session;
+  }
+  function videoPokerRecordHands(p, session) {
+    if (session.handsRecorded) return;
+    const stats = p.stats.scratch || emptyGameStats(); const results = session.results || [];
+    stats.videoPokerHands += results.length; stats.videoPokerHandsWon += results.filter((result) => result.multiplier > 0).length;
+    results.forEach((result) => {
+      if (result.rank > stats.videoPokerBestHandRank) {
+        stats.videoPokerBestHandRank = result.rank; stats.videoPokerBestHand = result.name;
+      }
+    });
+    session.handsRecorded = true; p.stats.scratch = stats; saveProfile(p);
+  }
+  function videoPokerFinalize(p, session, payout) {
+    if (session.finalized) return { payout: 0, settlement: null };
+    const award = Math.max(0, Math.floor(Number(payout) || 0)); const stats = p.stats.scratch || emptyGameStats();
+    p.coins += award; stats.score += award; stats.best = Math.max(stats.best, award); stats.profit += award;
+    stats.videoPokerWon += award; stats.videoPokerBestPayout = Math.max(stats.videoPokerBestPayout, award);
+    if (award > session.stake) stats.wins += 1; else if (award === session.stake) stats.draws += 1; else stats.losses += 1;
+    session.finalized = true; session.finalPayout = award; session.phase = 'complete'; p.stats.scratch = stats;
+    return { payout: award, settlement: saveProfile(p) };
+  }
+  function videoPokerStatsData(p) {
+    const stats = Object.assign(emptyGameStats(), p.stats.scratch || {});
+    return {
+      plays: stats.videoPokerPlays, hands: stats.videoPokerHands, handsWon: stats.videoPokerHandsWon,
+      wagered: stats.videoPokerWagered, won: stats.videoPokerWon, profit: stats.videoPokerWon - stats.videoPokerWagered,
+      bestPayout: stats.videoPokerBestPayout, bestHand: stats.videoPokerBestHand || '尚无中奖牌型',
+      highLowWins: stats.videoPokerHighLowWins, bestStreak: stats.videoPokerBestStreak, revives: stats.videoPokerRevives,
+      jackpots: stats.videoPokerJackpots, jackpotWon: stats.videoPokerJackpotWon
+    };
+  }
+  function videoPokerView(p, session, options) {
+    const opts = options || {}; const stake = session ? session.stake : int(opts.stake, 10); const stats = videoPokerStatsData(p);
+    let mode = opts.mode || (session ? session.phase === 'deal' ? 'deal' : session.phase === 'offer' || session.phase === 'complete' ? 'result' : session.phase === 'revive' ? 'revive' : 'gamble' : 'menu');
+    const help = mode === 'menu' ? ['.视频扑克 10 / 30 / 50', '.刮刮 扑克 10 / 30 / 50', '.视频扑克 统计']
+      : mode === 'deal' ? ['.视频扑克 保留 1,3,5', '.视频扑克 换 2,4', '.视频扑克 换 全部']
+        : mode === 'gamble' ? ['.视频扑克 比大 / 比小', '.视频扑克 收下']
+          : mode === 'revive' ? ['.视频扑克 复活', '.视频扑克 放弃']
+            : mode === 'result' && session && session.phase === 'offer' ? ['.视频扑克 收下', '.视频扑克 翻牌'] : ['.视频扑克 10 / 30 / 50', '.视频扑克 统计'];
+    const scene = {
+      mode, variant: session ? session.variant : videoPokerVariant(stake), stake, phase: session ? session.phase : mode,
+      paytable: videoPokerPaytable(stake).map((row) => ({ label: row.label, multiplier: row.multiplier })),
+      initialHand: session ? session.initialHand : [], hand: session ? session.hand : [],
+      hands: session ? session.hands : [], held: session ? session.held : [],
+      handNames: session ? (session.results || []).map((result) => result.name) : [],
+      handPayouts: session ? session.handPayouts || [] : [], totalPayout: session ? session.totalPayout : 0,
+      pendingPrize: session ? session.pendingPrize : 0, finalPayout: session ? session.finalPayout || 0 : 0,
+      jackpot: videoPokerJackpot(), jackpotAward: session ? session.jackpotAward || 0 : 0,
+      anchorCard: session ? session.anchorCard : null, previousCard: session ? session.previousCard : null,
+      drawnCard: session ? session.drawnCard : null, guess: session ? session.guess : '', correct: session ? session.correct : null,
+      streak: session ? session.streak : 0, reviveCost: session && session.phase === 'revive' ? videoPokerReviveCost(session.pendingPrize) : 0,
+      balance: p.coins, help, stats
+    };
+    const lines = [`Jackpot ${scene.jackpot.toFixed(2)}  |  当前余额 ${p.coins}`];
+    if (mode === 'menu') lines.push('10币：J或更好 + 翻牌比大小', '30币：所有2均为万能牌，三条起奖', '50币：五手扑克，每手按10币计算');
+    else if (mode === 'deal') lines.push(`已下注 ${stake}  |  选择要保留或更换的牌位。`);
+    else if (mode === 'stats') lines.push(`累计 ${stats.plays} 局 / ${stats.hands} 手  |  中奖手 ${stats.handsWon}`, `投入 ${stats.wagered}  |  实收 ${stats.won}  |  净值 ${signedValue(stats.profit)}`, `最高 ${stats.bestPayout}  |  最佳 ${stats.bestHand}  |  翻牌最长 ${stats.bestStreak}`);
+    else if (mode === 'gamble') lines.push(`待领 ${scene.pendingPrize.toFixed(2)}  |  连中 ${scene.streak}/13`, '猜中后奖金×1.3；相同点数也算失败。');
+    else if (mode === 'revive') lines.push(`本次猜错  |  复活需额外支付 ${scene.reviveCost} 游戏币`, `待领奖金 ${scene.pendingPrize.toFixed(2)} 保持不变。`);
+    else lines.push(`牌型：${scene.handNames.join(' / ') || '未成牌'}  |  牌面奖金 ${scene.totalPayout.toFixed(2)}`, session && session.phase === 'offer' ? '奖金尚未入账：收下，或进入翻牌比大小。' : `实际入账 ${scene.finalPayout} 游戏币。`);
+    return { kind: 'videoPoker', title: 'YAN 视频扑克', subtitle: `${scene.variant} · ${stake}币机台`, videoPokerScene: scene, lines, quote: opts.quote || '' };
+  }
+  async function handleVideoPoker(ctx, msg, args) {
+    const id = uid(ctx, msg); const name = uname(ctx, msg); const key = videoPokerSessionKey(id); const p = loadProfile(id, name);
+    let session = jsonGet(key, null); const op = String(args[0] || '帮助').toLowerCase();
+    if (['统计', '记录', 'stats'].indexOf(op) >= 0) return replyView(ctx, msg, videoPokerView(p, null, { mode: 'stats' }));
+    const requestedStake = int(op, 0);
+    if (VIDEO_POKER_BETS.indexOf(requestedStake) >= 0) {
+      if (session && !session.finalized) return replyView(ctx, msg, videoPokerView(p, session, { quote: '当前牌局尚未完成，请先处理手中的牌。' }));
+      if (!charge(p, requestedStake)) return replyView(ctx, msg, videoPokerView(p, null, { stake: requestedStake, quote: template(ctx, '文案_余额不足', { name }) }));
+      videoPokerFundJackpot(requestedStake); session = videoPokerCreateSession(id, requestedStake);
+      const stats = p.stats.scratch || emptyGameStats(); stats.plays += 1; stats.profit -= requestedStake;
+      stats.videoPokerPlays += 1; stats.videoPokerWagered += requestedStake; p.stats.scratch = stats; saveProfile(p);
+      jsonSet(key, session); return replyView(ctx, msg, videoPokerView(p, session, { quote: '五张牌已经发出，请决定保留哪些牌。' }));
+    }
+    if (!session) {
+      const quote = requestedStake ? '视频扑克只接受10、30或50游戏币下注。' : '';
+      return replyView(ctx, msg, videoPokerView(p, null, { mode: 'menu', quote }));
+    }
+    if (session.phase === 'deal' && ['保留', '留', 'hold', '换', '更换', 'draw'].indexOf(op) >= 0) {
+      const keepMode = ['保留', '留', 'hold'].indexOf(op) >= 0; const positions = videoPokerParsePositions(args.slice(1), keepMode);
+      if (!args.slice(1).join('').trim()) return replyView(ctx, msg, videoPokerView(p, session, { quote: '请给出1至5号牌位，或输入“换 全部”。' }));
+      if (!positions) return replyView(ctx, msg, videoPokerView(p, session, { quote: '牌位只能填写1至5，可用逗号或空格分隔。' }));
+      session.held = [1, 2, 3, 4, 5].map((position) => keepMode ? positions.indexOf(position) >= 0 : positions.indexOf(position) < 0);
+      videoPokerCompleteDraw(session); videoPokerRecordHands(p, session);
+      if (session.phase === 'offer') {
+        jsonSet(key, session); return replyView(ctx, msg, videoPokerView(p, session, { quote: '本手有奖：可以直接收下，也可以翻牌挑战。' }));
+      }
+      const finalized = videoPokerFinalize(p, session, session.totalPayout); clearKey(key);
+      return replyView(ctx, msg, videoPokerView(p, session, { quote: finalized.payout > 0 ? `本局已入账 ${finalized.payout} 游戏币。` : '本局没有形成可返奖牌型。' }));
+    }
+    if (session.phase === 'offer' && ['翻牌', 'double', '比牌'].indexOf(op) >= 0) {
+      session.anchorCard = videoPokerCard(session.deck.pop()); session.previousCard = null; session.drawnCard = null;
+      session.guess = ''; session.correct = null; session.phase = 'gamble'; session.updatedAt = nowMs(); jsonSet(key, session);
+      return replyView(ctx, msg, videoPokerView(p, session, { quote: '基准牌已经翻开，猜下一张更大还是更小。' }));
+    }
+    if ((session.phase === 'offer' || session.phase === 'gamble') && ['收下', '领取', 'cash', 'collect'].indexOf(op) >= 0) {
+      const finalized = videoPokerFinalize(p, session, session.pendingPrize); clearKey(key);
+      return replyView(ctx, msg, videoPokerView(p, session, { quote: `已收下 ${finalized.payout} 游戏币。` }));
+    }
+    if (session.phase === 'gamble' && ['比大', '大', '高', 'higher', '比小', '小', '低', 'lower'].indexOf(op) >= 0) {
+      const guessHigh = ['比大', '大', '高', 'higher'].indexOf(op) >= 0; const previous = videoPokerCard(session.anchorCard);
+      const drawn = videoPokerCard(session.deck.pop()); const correct = guessHigh ? drawn.value > previous.value : drawn.value < previous.value;
+      session.previousCard = previous; session.drawnCard = drawn; session.guess = guessHigh ? '比大' : '比小'; session.correct = correct;
+      if (correct) {
+        session.pendingPrize = videoPokerRound(session.pendingPrize * 1.3); session.streak += 1; session.anchorCard = drawn;
+        const stats = p.stats.scratch || emptyGameStats(); stats.videoPokerHighLowWins += 1; stats.videoPokerBestStreak = Math.max(stats.videoPokerBestStreak, session.streak); p.stats.scratch = stats;
+        if (session.streak >= 13) {
+          const pool = videoPokerJackpot(); const share = videoPokerRound(pool / 2); const bonus = Math.floor(share);
+          videoPokerSetJackpot(pool - share); session.jackpotAward = bonus; session.jackpotShare = share;
+          stats.videoPokerJackpots += 1; stats.videoPokerJackpotWon += bonus; p.stats.scratch = stats;
+          const finalized = videoPokerFinalize(p, session, Math.floor(session.pendingPrize) + bonus); clearKey(key);
+          return replyView(ctx, msg, videoPokerView(p, session, { quote: `连续命中13次，Jackpot追加 ${bonus} 游戏币！本局共入账 ${finalized.payout}。` }));
+        }
+        saveProfile(p); session.updatedAt = nowMs(); jsonSet(key, session);
+        return replyView(ctx, msg, videoPokerView(p, session, { quote: `猜中！待领奖金提升到 ${session.pendingPrize.toFixed(2)}。` }));
+      }
+      session.phase = 'revive'; session.reviveCost = videoPokerReviveCost(session.pendingPrize); session.updatedAt = nowMs(); jsonSet(key, session);
+      return replyView(ctx, msg, videoPokerView(p, session, { quote: drawn.value === previous.value ? `点数相同也算失败；可以额外支付 ${session.reviveCost} 游戏币复活。` : `猜错了；可以额外支付 ${session.reviveCost} 游戏币复活，或放弃本局。` }));
+    }
+    if (session.phase === 'revive' && ['复活', 'revive'].indexOf(op) >= 0) {
+      const reviveCost = videoPokerReviveCost(session.pendingPrize); session.reviveCost = reviveCost;
+      if (p.coins < reviveCost) {
+        jsonSet(key, session);
+        return replyView(ctx, msg, videoPokerView(p, session, { quote: `复活需要额外支付 ${reviveCost} 游戏币；当前余额 ${p.coins}，待领奖金不会被扣除。` }));
+      }
+      p.coins -= reviveCost; session.anchorCard = videoPokerCard(session.drawnCard);
+      session.previousCard = null; session.drawnCard = null; session.guess = ''; session.correct = null; session.reviveCost = 0; session.phase = 'gamble'; session.updatedAt = nowMs();
+      const stats = p.stats.scratch || emptyGameStats(); stats.videoPokerRevives += 1; stats.videoPokerWagered += reviveCost; stats.profit -= reviveCost; p.stats.scratch = stats; saveProfile(p); jsonSet(key, session);
+      return replyView(ctx, msg, videoPokerView(p, session, { quote: `已额外支付 ${reviveCost} 游戏币复活，待领奖金仍为 ${session.pendingPrize.toFixed(2)}。` }));
+    }
+    if ((session.phase === 'offer' || session.phase === 'gamble' || session.phase === 'revive') && ['放弃', '结束', 'giveup'].indexOf(op) >= 0) {
+      const finalized = videoPokerFinalize(p, session, 0); clearKey(key);
+      return replyView(ctx, msg, videoPokerView(p, session, { quote: `本局奖金已放弃，实际入账 ${finalized.payout}。` }));
+    }
+    return replyView(ctx, msg, videoPokerView(p, session, { quote: session.phase === 'deal' ? '请选择保留或更换的牌位。' : session.phase === 'revive' ? '当前只能选择复活或放弃。' : '请按图片下方提示继续操作。' }));
   }
 
   // -------------------- 钓鱼 --------------------
@@ -4398,7 +4693,7 @@
   function boardGameKey(board) {
     const gameMap = {
       '德州': 'poker', '德州扑克': 'poker', '21点': 'blackjack', '二十一点': 'blackjack',
-      '神抽': 'dmd', '亡命神抽': 'dmd', '刮刮': 'scratch', '刮刮乐': 'scratch',
+      '神抽': 'dmd', '亡命神抽': 'dmd', '刮刮': 'scratch', '刮刮乐': 'scratch', '视频扑克': 'scratch',
       '快艇': 'farkle', '快艇骰': 'farkle', 'farkle': 'farkle', '钓鱼': 'fishing',
       '爱赢一切': 'love', '爱赢': 'love', 'love': 'love',
       '竞拍': 'auction', '竞拍之王': 'auction', 'auction': 'auction'
@@ -4461,7 +4756,10 @@
     if (game === 'scratch') tiles.push(
       { label: '双色球 注 / 中', value: `${s.lotteryTickets} / ${s.lotteryWins}`, tone: 'positive' },
       { label: '双色球 奖金 / 最高', value: `${s.lotteryPrize} / ${s.lotteryBestPrize}`, tone: 'accent' },
-      { label: '生死骰 局 / 胜 / 净收益', value: `${s.deathDicePlays} / ${s.deathDiceWins} / ${signedValue(s.deathDiceProfit)}`, tone: s.deathDiceProfit >= 0 ? 'positive' : 'negative' }
+      { label: '生死骰 局 / 胜 / 净收益', value: `${s.deathDicePlays} / ${s.deathDiceWins} / ${signedValue(s.deathDiceProfit)}`, tone: s.deathDiceProfit >= 0 ? 'positive' : 'negative' },
+      { label: '视频扑克 局 / 中奖手', value: `${s.videoPokerPlays} / ${s.videoPokerHandsWon}`, tone: 'positive' },
+      { label: '视频扑克 投入 / 实收', value: `${s.videoPokerWagered} / ${s.videoPokerWon}`, tone: s.videoPokerWon >= s.videoPokerWagered ? 'positive' : 'negative' },
+      { label: '视频扑克 最高 / 最佳牌型', value: `${s.videoPokerBestPayout} / ${s.videoPokerBestHand || '暂无'}`, tone: 'accent' }
     );
     let auctionDetails = null;
     if (game === 'auction') {
@@ -4506,6 +4804,9 @@
     if (game === 'scratch') {
       lines.push(`双色球 ${s.lotteryTickets}注 / ${s.lotteryWins}次中奖  |  累计奖金 ${s.lotteryPrize}  |  最高 ${s.lotteryBestPrize}`);
       lines.push(`生死骰 ${s.deathDicePlays}局 ${s.deathDiceWins}胜/${s.deathDiceLosses}负  |  净收益 ${signedValue(s.deathDiceProfit)}  |  单次最高净赢 ${s.deathDiceBestWin}`);
+      lines.push(`视频扑克 ${s.videoPokerPlays}局 / ${s.videoPokerHands}手 / ${s.videoPokerHandsWon}手中奖  |  投入 ${s.videoPokerWagered}  |  实收 ${s.videoPokerWon}`);
+      lines.push(`视频扑克最高 ${s.videoPokerBestPayout}  |  最佳牌型 ${s.videoPokerBestHand || '尚无记录'}  |  翻牌连中 ${s.videoPokerBestStreak}  |  复活 ${s.videoPokerRevives}`);
+      lines.push(`Jackpot命中 ${s.videoPokerJackpots} 次  |  累计奖池奖金 ${s.videoPokerJackpotWon}  |  当前奖池 ${videoPokerJackpot().toFixed(2)}`);
     }
     if (auctionDetails) {
       lines.push(`最高竞拍价 ${s.highestBid}  |  最高利润 ${signedValue(s.bestAuctionProfit)}  |  单箱最多 ${s.mostAuctionItems} 件`);
@@ -4982,6 +5283,7 @@
 
   async function handleScratch(ctx, msg, args) {
     const id = uid(ctx, msg); const name = uname(ctx, msg); const key = `aff.scratch.ticket.v1:${encodeURIComponent(id)}`; const op = String(args[0] || '帮助').toLowerCase();
+    if (['扑克', '视频扑克', 'videopoker', 'video'].indexOf(op) >= 0) return handleVideoPoker(ctx, msg, args.slice(1));
     if (['双色球', 'lottery'].indexOf(op) >= 0) return handleLottery(ctx, msg, args.slice(1));
     if (['生死骰', 'deathdice'].indexOf(op) >= 0) return handleDeathDice(ctx, msg, args.slice(1));
     if (['借款', 'loan'].indexOf(op) >= 0) return handleLoan(ctx, msg, args.slice(1));
@@ -4990,7 +5292,7 @@
       const denom = int(args[1], 10); if (SCRATCH_DENOMS.indexOf(denom) < 0) return replyView(ctx, msg, { kind: 'scratch', title: '刮刮乐面额无效', lines: [`可选面额：${SCRATCH_DENOMS.join(' / ')}`, `类型：${SCRATCH_TYPES.join(' / ')}`], quote: '' });
       const type = SCRATCH_TYPES.indexOf(args[2]) >= 0 ? args[2] : pick(SCRATCH_TYPES); const p = loadProfile(id, name);
       if (!charge(p, denom)) return replyView(ctx, msg, { kind: 'scratch', title: '购买失败', lines: [`需要 ${denom} 游戏币`, `当前余额 ${p.coins}`], quote: template(ctx, '文案_余额不足', { name }) });
-      const ticket = makeScratchTicket(id, denom, type); jsonSet(key, ticket); return replyView(ctx, msg, scratchView(ticket, false, profileQuote(ctx, p)));
+      videoPokerFundJackpot(denom); const ticket = makeScratchTicket(id, denom, type); jsonSet(key, ticket); return replyView(ctx, msg, scratchView(ticket, false, profileQuote(ctx, p)));
     }
     if (['刮', '刮开', 'scratch'].indexOf(op) >= 0) {
       const ticket = jsonGet(key, null); if (!ticket) return replyView(ctx, msg, { kind: 'scratch', title: '没有未刮彩票', lines: ['先发送“.yan 刮刮 买 10 [类型]”。'], quote: '' });
@@ -5053,6 +5355,7 @@
     if (issueCount >= 20) return replyView(ctx, msg, lotterySceneView('status', p, { issue, status: '单期最多保留20注彩票，请等待开奖。' }));
     const price = clamp(seal.ext.getIntConfig(ext, '双色球单注价格'), 1, 10000);
     if (!charge(p, price)) return replyView(ctx, msg, lotterySceneView('menu', p, { issue, status: `购买失败：需要${price}游戏币，当前余额${p.coins}。`, quote: template(ctx, '文案_余额不足', { name }) }));
+    videoPokerFundJackpot(price);
     const ticket = { id: `${String(time)}-${String(Math.floor(Math.random() * 1000000)).padStart(6, '0')}`, issue, red, blue, cost: price, boughtAt: time };
     p.lottery.tickets.push(ticket); p.lottery.totalTickets += 1; p.stats.scratch.lotteryTickets += 1; p.stats.scratch.lotterySpent += price; p.stats.scratch.profit -= price; saveProfile(p);
     return replyView(ctx, msg, lotterySceneView('ticket', p, { issue, ticket, status: '购买成功。', quote: `${name}的号码已封存，开奖不会主动通知。` }));
@@ -5065,7 +5368,7 @@
     else if (['困难', 'hard'].indexOf(op) >= 0) difficulty = '困难';
     if (!difficulty) return replyView(ctx, msg, deathDiceView('menu', '简单', null, p));
     if (p.coins <= 0) return replyView(ctx, msg, deathDiceView('menu', difficulty, null, p, null));
-    const stake = p.coins; const roll = 1 + Math.floor(Math.random() * 6); const survived = difficulty === '困难' ? roll === 1 : roll !== 6;
+    const stake = p.coins; videoPokerFundJackpot(stake); const roll = 1 + Math.floor(Math.random() * 6); const survived = difficulty === '困难' ? roll === 1 : roll !== 6;
     const multiplier = difficulty === '困难' ? 3 : 1.2; const payout = survived ? Math.floor(stake * multiplier) : 0; const profit = payout - stake;
     p.coins = payout; const s = p.stats.scratch; s.plays += 1; s.score += payout; s.best = Math.max(s.best, payout); s.profit += profit;
     if (survived) s.wins += 1; else s.losses += 1;
@@ -5213,6 +5516,7 @@
       '.快艇 人机/开房  |  .快艇 教程 [页码]',
       '.爱赢一切 人机/开房  |  .爱赢一切 教程 [页码]',
       '.刮刮 买 [面额] [类型]  |  .刮刮 刮开',
+      '.视频扑克 10/30/50  |  .刮刮 扑克 10/30/50',
       '.双色球 [5红+1蓝]  |  每日18:00开奖，兑奖期限1天',
       '.生死骰 简单/困难  |  押上全部游戏币，不计好感',
       '.借款 申请  |  余额低于150可借，到手150应还195',
@@ -5230,7 +5534,7 @@
     '签到': '签到', '投喂': '投喂', '德州': '德州', 'texas': '德州', '21点': '21点', '二十一点': '21点',
     '神抽': '神抽', '亡命神抽': '神抽', '快艇': '快艇', '快艇骰': '快艇', 'farkle': '快艇',
     '爱赢一切': '爱赢一切', '爱赢': '爱赢一切', 'love': '爱赢一切',
-    '刮刮': '刮刮', '刮刮乐': '刮刮', '钓鱼': '钓鱼', '竞拍': '竞拍', '竞拍之王': '竞拍',
+    '刮刮': '刮刮', '刮刮乐': '刮刮', '视频扑克': '视频扑克', 'videopoker': '视频扑克', '钓鱼': '钓鱼', '竞拍': '竞拍', '竞拍之王': '竞拍',
     '双色球': '双色球', '生死骰': '生死骰', '借款': '借款',
     '排行': '排行', '排行榜': '排行', '好感榜': '排行'
   };
@@ -5255,6 +5559,7 @@
       else if (section === '快艇' || section === '快艇骰' || section.toLowerCase() === 'farkle') await handleFarkle(ctx, msg, args);
       else if (section === '爱赢一切' || section === '爱赢' || section.toLowerCase() === 'love') await handleLove(ctx, msg, args);
       else if (section === '刮刮' || section === '刮刮乐') await handleScratch(ctx, msg, args);
+      else if (section === '视频扑克') await handleVideoPoker(ctx, msg, args);
       else if (section === '双色球') await handleLottery(ctx, msg, args);
       else if (section === '生死骰') await handleDeathDice(ctx, msg, args);
       else if (section === '借款') await handleLoan(ctx, msg, args);

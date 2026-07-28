@@ -43,14 +43,14 @@ function storeRenderedImage(buffer) {
 }
 
 function backgroundFor(kind) {
-  if (['poker', 'blackjack', 'dmd', 'love'].includes(kind)) return BACKGROUNDS.casino;
+  if (['poker', 'blackjack', 'dmd', 'love', 'videoPoker'].includes(kind)) return BACKGROUNDS.casino;
   if (kind === 'fishing') return BACKGROUNDS.fishing;
   if (kind === 'auction') return BACKGROUNDS.auction;
   return BACKGROUNDS.dice;
 }
 
 function accentFor(kind) {
-  if (['poker', 'blackjack', 'dmd'].includes(kind)) return '#f3c969';
+  if (['poker', 'blackjack', 'dmd', 'videoPoker'].includes(kind)) return '#f3c969';
   if (kind === 'love') return '#7edc9d';
   if (kind === 'fishing') return '#82d5d0';
   if (kind === 'auction') return '#f0c84b';
@@ -170,6 +170,7 @@ function normalizeView(input) {
   const rawLottery = input && input.lotteryScene && typeof input.lotteryScene === 'object' ? input.lotteryScene : null;
   const rawDeathDice = input && input.deathDiceScene && typeof input.deathDiceScene === 'object' ? input.deathDiceScene : null;
   const rawLoan = input && input.loanScene && typeof input.loanScene === 'object' ? input.loanScene : null;
+  const rawVideoPoker = input && input.videoPokerScene && typeof input.videoPokerScene === 'object' ? input.videoPokerScene : null;
   const rawDmd = input && input.dmdTable && typeof input.dmdTable === 'object' ? input.dmdTable : null;
   const rawFarkle = input && input.farkleTable && typeof input.farkleTable === 'object' ? input.farkleTable : null;
   const rawLove = input && input.loveTable && typeof input.loveTable === 'object' ? input.loveTable : null;
@@ -213,7 +214,7 @@ function normalizeView(input) {
       affectionLost: safeNumber(module && module.affectionLost), grandSlams: safeNumber(module && module.grandSlams),
       bestPokerHand: sanitizeText(module && module.bestPokerHand, 20)
     })),
-    tiles: rawTiles.slice(0, 12).map((tile) => ({
+    tiles: rawTiles.slice(0, 15).map((tile) => ({
       label: sanitizeText(tile && tile.label, 30), value: sanitizeText(tile && tile.value, 40),
       tone: normalizeTone(tile && tile.tone)
     })),
@@ -303,6 +304,37 @@ function normalizeView(input) {
         at: Math.max(0, safeNumber(rawLoan.lastSettlement.at)), count: Math.max(0, Math.floor(safeNumber(rawLoan.lastSettlement.count))),
         repaid: Math.max(0, Math.floor(safeNumber(rawLoan.lastSettlement.repaid))), restored: Math.max(0, Math.floor(safeNumber(rawLoan.lastSettlement.restored))),
         balance: Math.max(0, Math.floor(safeNumber(rawLoan.lastSettlement.balance)))
+      } : null
+    } : null,
+    videoPokerScene: rawVideoPoker ? {
+      mode: ['menu', 'deal', 'result', 'gamble', 'revive', 'stats'].includes(rawVideoPoker.mode) ? rawVideoPoker.mode : 'menu',
+      variant: sanitizeText(rawVideoPoker.variant, 24), stake: [10, 30, 50].includes(Math.floor(safeNumber(rawVideoPoker.stake))) ? Math.floor(safeNumber(rawVideoPoker.stake)) : 10,
+      phase: sanitizeText(rawVideoPoker.phase, 20),
+      paytable: (Array.isArray(rawVideoPoker.paytable) ? rawVideoPoker.paytable : []).slice(0, 10).map((row) => ({
+        label: sanitizeText(row && row.label, 24), multiplier: Math.max(0, safeNumber(row && row.multiplier))
+      })),
+      initialHand: (Array.isArray(rawVideoPoker.initialHand) ? rawVideoPoker.initialHand : []).slice(0, 5).map(normalizePlayingCard).filter(Boolean),
+      hand: (Array.isArray(rawVideoPoker.hand) ? rawVideoPoker.hand : []).slice(0, 5).map(normalizePlayingCard).filter(Boolean),
+      hands: (Array.isArray(rawVideoPoker.hands) ? rawVideoPoker.hands : []).slice(0, 5).map((hand) => (Array.isArray(hand) ? hand : []).slice(0, 5).map(normalizePlayingCard).filter(Boolean)),
+      held: (Array.isArray(rawVideoPoker.held) ? rawVideoPoker.held : []).slice(0, 5).map(Boolean),
+      handNames: (Array.isArray(rawVideoPoker.handNames) ? rawVideoPoker.handNames : []).slice(0, 5).map((name) => sanitizeText(name, 24)),
+      handPayouts: (Array.isArray(rawVideoPoker.handPayouts) ? rawVideoPoker.handPayouts : []).slice(0, 5).map((value) => Math.max(0, safeNumber(value))),
+      totalPayout: Math.max(0, safeNumber(rawVideoPoker.totalPayout)), pendingPrize: Math.max(0, safeNumber(rawVideoPoker.pendingPrize)),
+      finalPayout: Math.max(0, Math.floor(safeNumber(rawVideoPoker.finalPayout))), jackpot: Math.max(0, safeNumber(rawVideoPoker.jackpot)),
+      jackpotAward: Math.max(0, Math.floor(safeNumber(rawVideoPoker.jackpotAward))),
+      anchorCard: normalizePlayingCard(rawVideoPoker.anchorCard), previousCard: normalizePlayingCard(rawVideoPoker.previousCard), drawnCard: normalizePlayingCard(rawVideoPoker.drawnCard),
+      guess: sanitizeText(rawVideoPoker.guess, 12), correct: rawVideoPoker.correct == null ? null : Boolean(rawVideoPoker.correct),
+      streak: Math.max(0, Math.min(13, Math.floor(safeNumber(rawVideoPoker.streak)))), reviveCost: Math.max(0, safeNumber(rawVideoPoker.reviveCost)),
+      balance: Math.max(0, Math.floor(safeNumber(rawVideoPoker.balance))),
+      help: (Array.isArray(rawVideoPoker.help) ? rawVideoPoker.help : []).slice(0, 5).map((line) => sanitizeText(line, 90)),
+      stats: rawVideoPoker.stats && typeof rawVideoPoker.stats === 'object' ? {
+        plays: Math.max(0, Math.floor(safeNumber(rawVideoPoker.stats.plays))), hands: Math.max(0, Math.floor(safeNumber(rawVideoPoker.stats.hands))),
+        handsWon: Math.max(0, Math.floor(safeNumber(rawVideoPoker.stats.handsWon))), wagered: Math.max(0, Math.floor(safeNumber(rawVideoPoker.stats.wagered))),
+        won: Math.max(0, Math.floor(safeNumber(rawVideoPoker.stats.won))), profit: Math.floor(safeNumber(rawVideoPoker.stats.profit)),
+        bestPayout: Math.max(0, Math.floor(safeNumber(rawVideoPoker.stats.bestPayout))), bestHand: sanitizeText(rawVideoPoker.stats.bestHand, 28),
+        highLowWins: Math.max(0, Math.floor(safeNumber(rawVideoPoker.stats.highLowWins))), bestStreak: Math.max(0, Math.floor(safeNumber(rawVideoPoker.stats.bestStreak))),
+        revives: Math.max(0, Math.floor(safeNumber(rawVideoPoker.stats.revives))), jackpots: Math.max(0, Math.floor(safeNumber(rawVideoPoker.stats.jackpots))),
+        jackpotWon: Math.max(0, Math.floor(safeNumber(rawVideoPoker.stats.jackpotWon)))
       } : null
     } : null,
     dmdTable: rawDmd ? {
@@ -658,22 +690,22 @@ function drawTiles(ctx, tiles, accent, startY) {
   if (!tiles.length) return startY;
   const gap = 18;
   const columnWidth = (992 - gap * 2) / 3;
-  const rowHeight = 112;
+  const dense = tiles.length > 12; const rowHeight = dense ? 96 : 112; const tileHeight = dense ? 82 : 96;
   tiles.forEach((tile, index) => {
     const x = 104 + (index % 3) * (columnWidth + gap);
     const y = startY + Math.floor(index / 3) * rowHeight;
     const color = toneColor(tile.tone, accent);
-    roundedRect(ctx, x, y, columnWidth, 96, 6);
+    roundedRect(ctx, x, y, columnWidth, tileHeight, 6);
     ctx.fillStyle = 'rgba(255,255,255,0.07)';
     ctx.fill();
     ctx.fillStyle = color;
-    ctx.fillRect(x, y, 5, 96);
-    ctx.font = '16px "Microsoft YaHei", "Noto Sans CJK SC", sans-serif';
+    ctx.fillRect(x, y, 5, tileHeight);
+    ctx.font = `${dense ? 14 : 16}px "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`;
     ctx.fillStyle = '#bfc9c6';
-    ctx.fillText(tile.label, x + 20, y + 29, columnWidth - 40);
-    ctx.font = '700 29px "Microsoft YaHei", "Noto Sans CJK SC", sans-serif';
+    ctx.fillText(tile.label, x + 20, y + (dense ? 25 : 29), columnWidth - 40);
+    ctx.font = `700 ${dense ? 24 : 29}px "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`;
     ctx.fillStyle = color;
-    ctx.fillText(tile.value, x + 20, y + 69, columnWidth - 40);
+    ctx.fillText(tile.value, x + 20, y + (dense ? 60 : 69), columnWidth - 40);
   });
   return startY + Math.ceil(tiles.length / 3) * rowHeight;
 }
@@ -828,8 +860,9 @@ function drawPlayingCard(ctx, card, x, y, width, height) {
   ctx.stroke();
   const red = card.suit === 'H' || card.suit === 'D';
   ctx.fillStyle = red ? '#c83f49' : '#172124';
-  ctx.font = `700 ${Math.max(17, Math.floor(width * 0.34))}px Georgia, serif`;
-  ctx.fillText(card.rank, x + 12, y + 25, width - 20);
+  const rankFontSize = Math.max(17, Math.floor(width * 0.34));
+  ctx.font = `700 ${rankFontSize}px Georgia, serif`;
+  ctx.fillText(card.rank, x + 12, y + Math.max(25, Math.floor(rankFontSize * 0.92)), width - 20);
   drawPlayingCardSuit(ctx, card.suit, x + width / 2, y + height * 0.64, Math.min(width * 0.43, height * 0.34));
 }
 
@@ -1333,6 +1366,134 @@ function drawLoanScene(ctx, view) {
     ctx.fillStyle = scene.eligible ? '#2f7c73' : '#8a6f60'; ctx.font = '800 20px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.eligible ? '可以申请：.借款 申请' : '当前余额不符合借款条件', 190, 682);
   }
   ctx.fillStyle = '#725346'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(view.quote || '借款次数越多，下一笔扣除的好感越多。', 600, 778, 820); ctx.textAlign = 'left';
+}
+
+function videoPokerNumber(value) {
+  const number = Math.max(0, safeNumber(value));
+  return Number.isInteger(number) ? String(number) : number.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function drawVideoPokerPaytable(ctx, scene) {
+  const rows = scene.paytable; const columns = 5; const gap = 10; const width = (1092 - gap * 4) / columns; const height = 55;
+  rows.forEach((row, index) => {
+    const x = 54 + (index % columns) * (width + gap); const y = 112 + Math.floor(index / columns) * 62;
+    roundedRect(ctx, x, y, width, height, 7); ctx.fillStyle = index < 2 ? 'rgba(119,72,22,0.94)' : 'rgba(9,19,22,0.93)'; ctx.fill();
+    ctx.strokeStyle = index < 2 ? '#ffd66e' : 'rgba(243,201,105,0.34)'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = index < 2 ? '#fff0b0' : '#e8e2d4'; ctx.font = '800 13px "Microsoft YaHei", sans-serif'; ctx.fillText(row.label, x + 12, y + 21, width - 24);
+    ctx.fillStyle = index < 2 ? '#fff7d8' : '#82d5d0'; ctx.font = '800 19px Arial, sans-serif'; ctx.textAlign = 'right'; ctx.fillText(`${videoPokerNumber(row.multiplier)}×`, x + width - 12, y + 43); ctx.textAlign = 'left';
+  });
+}
+
+function drawVideoPokerFooter(ctx, view, scene) {
+  roundedRect(ctx, 54, 787, 1092, 46, 7); ctx.fillStyle = 'rgba(7,14,16,0.92)'; ctx.fill();
+  const help = scene.help.join('   ·   '); ctx.fillStyle = '#f3c969'; ctx.font = '800 14px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(help || '选择机台开始游戏', 600, 815, 1040);
+  ctx.fillStyle = '#c4cfcc'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(view.quote || `当前余额 ${scene.balance} 游戏币`, 600, 862, 1050); ctx.textAlign = 'left';
+}
+
+function drawVideoPokerCardRow(ctx, cards, held, y, compact) {
+  const width = compact ? 52 : 138; const height = compact ? 72 : 190; const gap = compact ? 10 : 18;
+  const total = cards.length * width + Math.max(0, cards.length - 1) * gap; const startX = 600 - total / 2;
+  cards.forEach((card, index) => {
+    const x = startX + index * (width + gap); drawPlayingCard(ctx, card, x, y, width, height);
+    if (!compact) {
+      roundedRect(ctx, x + 12, y + height + 9, width - 24, 28, 14); ctx.fillStyle = held[index] ? '#d6ad4d' : 'rgba(255,255,255,0.10)'; ctx.fill();
+      ctx.fillStyle = held[index] ? '#172124' : '#aeb8b5'; ctx.font = '800 13px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(held[index] ? `保留 ${index + 1}` : `${index + 1}`, x + width / 2, y + height + 28); ctx.textAlign = 'left';
+    }
+  });
+}
+
+function drawVideoPokerMenu(ctx, scene) {
+  const modes = [
+    { stake: 10, title: 'J或更好', text: '单手换牌 · 有奖后可翻牌比大小', color: '#82d5d0', card: { rank: 'J', suit: 'H' } },
+    { stake: 30, title: '狂野的2', text: '所有2都是万能牌 · 三条开始返奖', color: '#f2b5d4', card: { rank: '2', suit: 'D' } },
+    { stake: 50, title: '五手扑克', text: '一次保留 · 独立完成五手 · 每手10币', color: '#f3c969', card: { rank: 'A', suit: 'S' } }
+  ];
+  modes.forEach((mode, index) => {
+    const x = 72 + index * 358; const y = 270; roundedRect(ctx, x, y, 330, 405, 12); ctx.fillStyle = 'rgba(8,17,19,0.92)'; ctx.fill();
+    ctx.strokeStyle = mode.color; ctx.lineWidth = 2; ctx.stroke(); drawPlayingCard(ctx, mode.card, x + 105, y + 36, 120, 166);
+    ctx.fillStyle = mode.color; ctx.font = '800 30px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(mode.title, x + 165, y + 244, 290);
+    ctx.fillStyle = '#f7f3ea'; ctx.font = '800 40px Arial, sans-serif'; ctx.fillText(`${mode.stake}`, x + 165, y + 298); ctx.fillStyle = '#aeb8b5'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText('游戏币 / 局', x + 165, y + 325);
+    ctx.fillStyle = '#d3d9d6'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(mode.text, x + 165, y + 365, 290); ctx.textAlign = 'left';
+  });
+  ctx.fillStyle = '#f3c969'; ctx.font = '800 20px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`渐进Jackpot · ${videoPokerNumber(scene.jackpot)} 游戏币`, 600, 731); ctx.textAlign = 'left';
+}
+
+function drawVideoPokerStats(ctx, scene) {
+  const stats = scene.stats || {}; const metrics = [
+    ['累计牌局', stats.plays, '#f3c969'], ['完成手数', stats.hands, '#cfd7d4'], ['中奖手数', stats.handsWon, '#82d5d0'],
+    ['累计投入', stats.wagered, '#ef8d7f'], ['累计实收', stats.won, '#82d5d0'], ['净收益', `${stats.profit >= 0 ? '+' : ''}${stats.profit || 0}`, stats.profit >= 0 ? '#82d5d0' : '#ef8d7f'],
+    ['单局最高', stats.bestPayout, '#f3c969'], ['最佳牌型', stats.bestHand || '尚无记录', '#f2b5d4'], ['翻牌猜中', stats.highLowWins, '#82d5d0'],
+    ['最长连中', `${stats.bestStreak || 0}/13`, '#f3c969'], ['复活次数', stats.revives, '#9bb7d4'], ['Jackpot', `${stats.jackpots || 0}次 / ${stats.jackpotWon || 0}币`, '#f2b5d4']
+  ];
+  metrics.forEach((item, index) => {
+    const x = 72 + (index % 3) * 358; const y = 272 + Math.floor(index / 3) * 112;
+    roundedRect(ctx, x, y, 330, 94, 8); ctx.fillStyle = 'rgba(8,17,19,0.91)'; ctx.fill(); ctx.fillStyle = item[2]; ctx.fillRect(x, y, 5, 94);
+    ctx.fillStyle = '#aeb8b5'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(item[0], x + 22, y + 29, 286);
+    ctx.fillStyle = item[2]; ctx.font = '800 27px "Microsoft YaHei", sans-serif'; ctx.fillText(String(item[1] == null ? 0 : item[1]), x + 22, y + 68, 286);
+  });
+  roundedRect(ctx, 72, 728, 1046, 40, 20); ctx.fillStyle = 'rgba(243,201,105,0.12)'; ctx.fill();
+  ctx.fillStyle = '#f3c969'; ctx.font = '800 18px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`当前Jackpot ${videoPokerNumber(scene.jackpot)} 游戏币`, 600, 754); ctx.textAlign = 'left';
+}
+
+function drawVideoPokerFiveHands(ctx, scene) {
+  scene.hands.forEach((hand, index) => {
+    const y = 258 + index * 90; roundedRect(ctx, 72, y, 1046, 80, 8); ctx.fillStyle = index % 2 ? 'rgba(8,17,19,0.88)' : 'rgba(19,37,39,0.90)'; ctx.fill();
+    ctx.fillStyle = '#f3c969'; ctx.font = '800 17px Arial, sans-serif'; ctx.fillText(`HAND ${index + 1}`, 92, y + 32);
+    ctx.fillStyle = '#aeb8b5'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText('每手10币', 92, y + 56);
+    const width = 48; const gap = 10; hand.forEach((card, cardIndex) => drawPlayingCard(ctx, card, 225 + cardIndex * (width + gap), y + 7, width, 66));
+    ctx.fillStyle = scene.handPayouts[index] > 0 ? '#82d5d0' : '#aeb8b5'; ctx.font = '800 18px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.handNames[index] || '未成牌', 550, y + 32, 290);
+    ctx.textAlign = 'right'; ctx.fillStyle = scene.handPayouts[index] > 0 ? '#f3c969' : '#77827f'; ctx.font = '800 24px "Microsoft YaHei", Arial, sans-serif'; ctx.fillText(`${videoPokerNumber(scene.handPayouts[index] || 0)}币`, 1090, y + 49); ctx.textAlign = 'left';
+  });
+  ctx.fillStyle = '#f7f3ea'; ctx.font = '800 24px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`五手合计 ${videoPokerNumber(scene.totalPayout)} · 实际入账 ${scene.finalPayout}`, 600, 750); ctx.textAlign = 'left';
+}
+
+function drawVideoPokerSingleHand(ctx, scene) {
+  const cards = scene.mode === 'deal' ? scene.initialHand : (scene.hand.length ? scene.hand : scene.initialHand);
+  ctx.fillStyle = '#c4cfcc'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(scene.mode === 'deal' ? '选择保留牌位后一次性换牌' : `最终牌型 · ${scene.handNames[0] || '未成牌'}`, 600, 286); ctx.textAlign = 'left';
+  drawVideoPokerCardRow(ctx, cards, scene.held, 304, false);
+  roundedRect(ctx, 152, 555, 896, 138, 10); ctx.fillStyle = 'rgba(8,17,19,0.92)'; ctx.fill();
+  ctx.textAlign = 'center';
+  if (scene.mode === 'deal') {
+    ctx.fillStyle = '#f3c969'; ctx.font = '800 30px "Microsoft YaHei", sans-serif'; ctx.fillText(`已下注 ${scene.stake} 游戏币`, 600, 602);
+    ctx.fillStyle = '#c4cfcc'; ctx.font = '17px "Microsoft YaHei", sans-serif'; ctx.fillText('保留指定牌位，或换掉指定牌位', 600, 642);
+  } else {
+    const pending = scene.phase === 'offer'; ctx.fillStyle = scene.totalPayout > 0 ? '#82d5d0' : '#ef8d7f'; ctx.font = '800 30px "Microsoft YaHei", sans-serif';
+    ctx.fillText(scene.totalPayout > 0 ? `牌面奖金 ${videoPokerNumber(scene.totalPayout)}` : '没有形成返奖牌型', 600, 599);
+    ctx.fillStyle = pending ? '#f3c969' : '#c4cfcc'; ctx.font = '17px "Microsoft YaHei", sans-serif';
+    ctx.fillText(pending ? '奖金尚未入账 · 收下或翻牌挑战' : `实际入账 ${scene.finalPayout} · 当前余额 ${scene.balance}`, 600, 641);
+    if (scene.jackpotAward) { ctx.fillStyle = '#f2b5d4'; ctx.font = '800 18px "Microsoft YaHei", sans-serif'; ctx.fillText(`Jackpot追加 ${scene.jackpotAward} 游戏币`, 600, 673); }
+  }
+  ctx.textAlign = 'left';
+}
+
+function drawVideoPokerGamble(ctx, scene) {
+  const left = scene.previousCard || scene.anchorCard; const right = scene.drawnCard || { hidden: true };
+  roundedRect(ctx, 110, 260, 980, 470, 12); ctx.fillStyle = 'rgba(8,17,19,0.93)'; ctx.fill();
+  drawPlayingCard(ctx, left, 320, 314, 160, 220); drawPlayingCard(ctx, right, 720, 314, 160, 220);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#c4cfcc'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.previousCard ? '上张基准牌' : '当前基准牌', 400, 566); ctx.fillText(scene.drawnCard ? '本次翻牌' : '等待下一张', 800, 566);
+  ctx.fillStyle = scene.correct === true ? '#82d5d0' : scene.correct === false ? '#ef8d7f' : '#f3c969'; ctx.font = '800 46px Arial, sans-serif';
+  ctx.fillText(scene.correct === true ? '✓' : scene.correct === false ? '×' : '?', 600, 435);
+  ctx.font = '800 18px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.guess || '比大 / 比小', 600, 474);
+  roundedRect(ctx, 230, 606, 740, 82, 8); ctx.fillStyle = scene.mode === 'revive' ? 'rgba(99,31,43,0.82)' : 'rgba(23,77,70,0.78)'; ctx.fill();
+  ctx.fillStyle = '#f7f3ea'; ctx.font = '800 26px "Microsoft YaHei", sans-serif'; ctx.fillText(`待领 ${videoPokerNumber(scene.pendingPrize)}  ·  连中 ${scene.streak}/13`, 600, 640);
+  ctx.fillStyle = scene.mode === 'revive' ? '#f2b5d4' : '#c4cfcc'; ctx.font = '15px "Microsoft YaHei", sans-serif';
+  ctx.fillText(scene.mode === 'revive' ? `额外支付 ${videoPokerNumber(scene.reviveCost)} 游戏币 · 待领奖金不变` : '猜中倍率 ×1.3 · 相同点数也算失败', 600, 671); ctx.textAlign = 'left';
+  roundedRect(ctx, 300, 740, 600, 30, 15); ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fill();
+  if (scene.streak > 0) { roundedRect(ctx, 300, 740, 600 * scene.streak / 13, 30, 15); ctx.fillStyle = '#f3c969'; ctx.fill(); }
+  ctx.fillStyle = '#172124'; ctx.font = '800 13px Arial, sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`${scene.streak} / 13`, 600, 760); ctx.textAlign = 'left';
+}
+
+function drawVideoPokerScene(ctx, view) {
+  const scene = view.videoPokerScene; drawSceneHeader(ctx, view, '#f3c969'); drawVideoPokerPaytable(ctx, scene);
+  if (scene.mode === 'menu') drawVideoPokerMenu(ctx, scene);
+  else if (scene.mode === 'stats') drawVideoPokerStats(ctx, scene);
+  else if (scene.mode === 'gamble' || scene.mode === 'revive') drawVideoPokerGamble(ctx, scene);
+  else if (scene.stake === 50 && scene.hands.length) drawVideoPokerFiveHands(ctx, scene);
+  else drawVideoPokerSingleHand(ctx, scene);
+  drawVideoPokerFooter(ctx, view, scene);
 }
 
 function dmdSuitVisual(suit) {
@@ -2430,6 +2591,10 @@ async function renderView(rawView) {
   }
   if (view.blackjackTable) {
     drawBlackjackTable(ctx, view, accent);
+    return canvas.toBuffer('image/png');
+  }
+  if (view.videoPokerScene) {
+    drawVideoPokerScene(ctx, view);
     return canvas.toBuffer('image/png');
   }
   if (view.lotteryScene) {

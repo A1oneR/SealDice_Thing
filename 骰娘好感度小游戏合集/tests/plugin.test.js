@@ -323,7 +323,7 @@ test('项目详细统计使用真实上下文生成文案', async () => {
 test('短指令与yan总入口共用档案和功能', async () => {
   const h = createHarness();
   assert.ok(h.ext.cmdMap.yan);
-  ['我的', '签到', '德州', '21点', '神抽', '快艇', '刮刮', '双色球', '生死骰', '借款', '钓鱼', '排行'].forEach((name) => assert.equal(h.ext.cmdMap[name], h.ext.cmdMap.yan));
+  ['我的', '签到', '德州', '21点', '神抽', '快艇', '刮刮', '视频扑克', '双色球', '生死骰', '借款', '钓鱼', '排行'].forEach((name) => assert.equal(h.ext.cmdMap[name], h.ext.cmdMap.yan));
   const profileReply = await h.run('我的');
   assert.match(profileReply[0].text, /测试员/);
   await h.run('签到');
@@ -494,6 +494,119 @@ test('生死骰按难度全额结算且不改变好感', async () => {
   profile = death.storedJson(`aff.profile.v1:${encodeURIComponent('QQ:1001')}`);
   assert.equal(profile.coins, 0); assert.equal(profile.affection, 0);
   assert.equal(profile.stats.scratch.deathDiceLosses, 1); assert.equal(profile.stats.scratch.deathDiceProfit, -500);
+});
+
+test('视频扑克10币机台使用同副剩余牌翻牌，猜错可从钱包额外付费复活', async () => {
+  const views = [];
+  const h = createHarness({
+    fetch: async (url, options) => {
+      views.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ url: `/api/image/${String(views.length).padStart(24, '0')}` }) };
+    }
+  });
+  await h.runRaw('yan', ['注册', '扑克员']); h.configs.set('启用图片输出', true);
+  await h.run('视频扑克', ['10']);
+  const sessionKey = `aff.videoPoker.session.v1:${encodeURIComponent('QQ:1001')}`;
+  const profileKey = `aff.profile.v1:${encodeURIComponent('QQ:1001')}`;
+  let session = h.storedJson(sessionKey);
+  assert.equal(session.phase, 'deal'); assert.equal(session.initialHand.length, 5); assert.equal(session.deck.length, 47);
+  assert.equal(h.storedJson(profileKey).coins, 490); assert.equal(h.storedJson('aff.videoPoker.jackpot.v1'), 1001);
+
+  session.initialHand = [
+    { rank: 'J', suit: 'H', value: 11 }, { rank: 'J', suit: 'D', value: 11 }, { rank: '4', suit: 'S', value: 4 },
+    { rank: '7', suit: 'C', value: 7 }, { rank: '9', suit: 'H', value: 9 }
+  ];
+  session.hand = session.initialHand.slice();
+  session.deck = [{ rank: 'K', suit: 'S', value: 13 }, { rank: '5', suit: 'D', value: 5 }, { rank: '5', suit: 'C', value: 5 }];
+  h.ext.storageSet(sessionKey, JSON.stringify(session));
+  await h.run('视频扑克', ['保留', '全部']);
+  session = h.storedJson(sessionKey); assert.equal(session.phase, 'offer'); assert.equal(session.totalPayout, 7.5);
+  assert.equal(session.results[0].name, 'J或更好'); assert.equal(views.at(-1).videoPokerScene.mode, 'result');
+
+  await h.run('视频扑克', ['翻牌']); session = h.storedJson(sessionKey); assert.equal(session.anchorCard.value, 5); assert.equal(session.deck.length, 2);
+  await h.run('视频扑克', ['比大']); session = h.storedJson(sessionKey); assert.equal(session.phase, 'revive'); assert.equal(session.correct, false); assert.equal(session.reviveCost, 4);
+  await h.run('视频扑克', ['复活']); session = h.storedJson(sessionKey); assert.equal(session.phase, 'gamble'); assert.equal(session.pendingPrize, 7.5); assert.equal(h.storedJson(profileKey).coins, 486);
+  await h.run('视频扑克', ['比大']); session = h.storedJson(sessionKey); assert.equal(session.correct, true); assert.equal(session.pendingPrize, 9.75);
+  await h.run('视频扑克', ['收下']); assert.equal(h.ext.storageGet(sessionKey), '');
+  const profile = h.storedJson(profileKey);
+  assert.equal(profile.coins, 495); assert.equal(profile.affection, 0); assert.equal(profile.stats.scratch.videoPokerWon, 9);
+  assert.equal(profile.stats.scratch.videoPokerWagered, 14); assert.equal(profile.stats.scratch.profit, -5);
+  assert.equal(profile.stats.scratch.videoPokerHighLowWins, 1); assert.equal(profile.stats.scratch.videoPokerBestStreak, 1); assert.equal(profile.stats.scratch.videoPokerRevives, 1);
+});
+
+test('视频扑克复活余额不足时保留待领奖金与复活状态', async () => {
+  const h = createHarness(); await h.run('视频扑克', ['10']);
+  const sessionKey = `aff.videoPoker.session.v1:${encodeURIComponent('QQ:1001')}`; const profileKey = `aff.profile.v1:${encodeURIComponent('QQ:1001')}`;
+  const session = h.storedJson(sessionKey); const profile = h.storedJson(profileKey);
+  session.phase = 'revive'; session.pendingPrize = 1200.5; session.reviveCost = 601; session.drawnCard = { rank: '8', suit: 'D', value: 8 };
+  profile.coins = 600; h.ext.storageSet(sessionKey, JSON.stringify(session)); h.ext.storageSet(profileKey, JSON.stringify(profile));
+  await h.run('视频扑克', ['复活']);
+  const storedSession = h.storedJson(sessionKey); const storedProfile = h.storedJson(profileKey);
+  assert.equal(storedSession.phase, 'revive'); assert.equal(storedSession.pendingPrize, 1200.5); assert.equal(storedSession.reviveCost, 601);
+  assert.equal(storedProfile.coins, 600); assert.equal(storedProfile.stats.scratch.videoPokerRevives, 0);
+});
+
+test('视频扑克30币狂野2正确识别狂野皇家同花顺并从三条起奖', async () => {
+  const h = createHarness(); await h.run('视频扑克', ['30']);
+  const sessionKey = `aff.videoPoker.session.v1:${encodeURIComponent('QQ:1001')}`; const profileKey = `aff.profile.v1:${encodeURIComponent('QQ:1001')}`;
+  const session = h.storedJson(sessionKey);
+  session.initialHand = [
+    { rank: '2', suit: 'S', value: 2 }, { rank: '2', suit: 'H', value: 2 }, { rank: 'A', suit: 'H', value: 14 },
+    { rank: 'K', suit: 'H', value: 13 }, { rank: 'Q', suit: 'H', value: 12 }
+  ];
+  session.hand = session.initialHand.slice(); h.ext.storageSet(sessionKey, JSON.stringify(session));
+  await h.run('视频扑克', ['保留', '全部']);
+  assert.equal(h.ext.storageGet(sessionKey), '');
+  const profile = h.storedJson(profileKey);
+  assert.equal(profile.coins, 1025); assert.equal(profile.stats.scratch.videoPokerWon, 555);
+  assert.equal(profile.stats.scratch.videoPokerBestHand, '狂野皇家同花顺'); assert.equal(profile.stats.scratch.videoPokerHandsWon, 1);
+});
+
+test('视频扑克50币机台共用保留牌并独立结算五手', async () => {
+  const views = [];
+  const h = createHarness({
+    fetch: async (url, options) => {
+      views.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ url: `/api/image/${String(views.length).padStart(24, '0')}` }) };
+    }
+  });
+  await h.runRaw('yan', ['注册', '五手玩家']); h.configs.set('启用图片输出', true); await h.run('视频扑克', ['50']);
+  const sessionKey = `aff.videoPoker.session.v1:${encodeURIComponent('QQ:1001')}`; const profileKey = `aff.profile.v1:${encodeURIComponent('QQ:1001')}`;
+  const session = h.storedJson(sessionKey);
+  session.initialHand = [
+    { rank: 'J', suit: 'S', value: 11 }, { rank: 'J', suit: 'C', value: 11 }, { rank: '5', suit: 'H', value: 5 },
+    { rank: '8', suit: 'D', value: 8 }, { rank: '10', suit: 'C', value: 10 }
+  ];
+  session.hand = session.initialHand.slice(); h.ext.storageSet(sessionKey, JSON.stringify(session));
+  await h.run('视频扑克', ['保留', '全部']);
+  const resultView = views.at(-1).videoPokerScene; assert.equal(resultView.hands.length, 5); assert.equal(resultView.handPayouts.length, 5); assert.equal(resultView.totalPayout, 37.5);
+  const profile = h.storedJson(profileKey); assert.equal(profile.coins, 487); assert.equal(profile.stats.scratch.videoPokerHands, 5); assert.equal(profile.stats.scratch.videoPokerHandsWon, 5);
+});
+
+test('视频扑克连续命中13次获得一半Jackpot并保留奖池小数', async () => {
+  const h = createHarness(); await h.run('视频扑克', ['10']);
+  const sessionKey = `aff.videoPoker.session.v1:${encodeURIComponent('QQ:1001')}`; const profileKey = `aff.profile.v1:${encodeURIComponent('QQ:1001')}`;
+  let session = h.storedJson(sessionKey);
+  session.initialHand = [
+    { rank: 'J', suit: 'S', value: 11 }, { rank: 'J', suit: 'C', value: 11 }, { rank: '5', suit: 'H', value: 5 },
+    { rank: '8', suit: 'D', value: 8 }, { rank: '10', suit: 'C', value: 10 }
+  ];
+  session.hand = session.initialHand.slice(); h.ext.storageSet(sessionKey, JSON.stringify(session)); await h.run('视频扑克', ['保留', '全部']);
+  session = h.storedJson(sessionKey); session.phase = 'gamble'; session.pendingPrize = 100; session.streak = 12;
+  session.anchorCard = { rank: '5', suit: 'S', value: 5 }; session.deck = [{ rank: 'K', suit: 'H', value: 13 }]; h.ext.storageSet(sessionKey, JSON.stringify(session));
+  h.ext.storageSet('aff.videoPoker.jackpot.v1', JSON.stringify(1000.5)); await h.run('视频扑克', ['比大']);
+  assert.equal(h.ext.storageGet(sessionKey), ''); assert.equal(h.storedJson('aff.videoPoker.jackpot.v1'), 500.25);
+  const profile = h.storedJson(profileKey); assert.equal(profile.coins, 1120); assert.equal(profile.stats.scratch.videoPokerJackpots, 1);
+  assert.equal(profile.stats.scratch.videoPokerJackpotWon, 500); assert.equal(profile.stats.scratch.videoPokerBestStreak, 13);
+});
+
+test('刮刮栏目各类下注都会按十分之一注入视频扑克Jackpot', async () => {
+  const h = createHarness({ random: () => 0 });
+  await h.run('刮刮', ['买', '10', '幸运数字']);
+  await h.run('双色球', ['1', '2', '3', '4', '5', '1']);
+  await h.run('视频扑克', ['30']);
+  await h.run('生死骰', ['简单']);
+  assert.equal(h.storedJson('aff.videoPoker.jackpot.v1'), 1050);
 });
 
 test('多笔借款递增扣好感并在余额达到345时逐笔归还', async () => {

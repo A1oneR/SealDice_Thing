@@ -364,6 +364,78 @@ test('双色球、生死骰与借款专用票面均可渲染', async () => {
   assert.ok(loanPng.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'loan-preview.png'), loanPng);
 });
 
+test('视频扑克可渲染置顶赔率、单手换牌、五手结算、翻牌复活与独特统计', async () => {
+  const paytable = [
+    ['皇家同花顺', 600], ['同花顺', 37.5], ['四条', 18.75], ['葫芦', 6.75], ['同花', 4.5],
+    ['顺子', 3], ['三条', 2.25], ['两对', 1.5], ['J或更好', 0.75]
+  ].map(([label, multiplier]) => ({ label, multiplier }));
+  const menuInput = {
+    kind: 'videoPoker', title: 'YAN 视频扑克', subtitle: 'J或更好 · 10币机台', quote: '选择10、30或50游戏币机台开始。',
+    videoPokerScene: {
+      mode: 'menu', variant: 'J或更好', stake: 10, phase: 'menu', paytable, jackpot: 1358.7, balance: 860,
+      help: ['.视频扑克 10 / 30 / 50', '.刮刮 扑克 10 / 30 / 50', '.视频扑克 统计'], stats: {}
+    }
+  };
+  const normalizedMenu = normalizeView(menuInput); assert.equal(normalizedMenu.videoPokerScene.paytable.length, 9); assert.equal(normalizedMenu.videoPokerScene.jackpot, 1358.7);
+  let png = await renderView(menuInput); assert.ok(png.length > 50_000); let image = await loadImage(png); assert.equal(image.width, 1200); assert.equal(image.height, 900);
+  fs.writeFileSync(path.join(__dirname, '..', 'docs', 'video-poker-menu-preview.png'), png);
+
+  const cards = [{ rank: 'J', suit: 'H' }, { rank: 'J', suit: 'D' }, { rank: '7', suit: 'S' }, { rank: '9', suit: 'C' }, { rank: 'A', suit: 'H' }];
+  png = await renderView({
+    ...menuInput, subtitle: 'J或更好 · 10币机台', quote: '保留J对子，换掉其余三张牌。',
+    videoPokerScene: { ...menuInput.videoPokerScene, mode: 'deal', phase: 'deal', initialHand: cards, hand: cards, held: [true, true, false, false, false], help: ['.视频扑克 保留 1,2', '.视频扑克 换 3,4,5'] }
+  });
+  assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'video-poker-deal-preview.png'), png);
+
+  const fiveHands = [
+    cards, [{ rank: 'J', suit: 'H' }, { rank: 'J', suit: 'D' }, { rank: 'J', suit: 'C' }, { rank: '9', suit: 'C' }, { rank: 'A', suit: 'H' }],
+    [{ rank: '10', suit: 'S' }, { rank: 'J', suit: 'S' }, { rank: 'Q', suit: 'S' }, { rank: 'K', suit: 'S' }, { rank: 'A', suit: 'S' }],
+    [{ rank: '4', suit: 'H' }, { rank: '4', suit: 'D' }, { rank: '8', suit: 'S' }, { rank: '8', suit: 'C' }, { rank: 'A', suit: 'H' }],
+    [{ rank: '3', suit: 'H' }, { rank: '5', suit: 'D' }, { rank: '7', suit: 'S' }, { rank: '9', suit: 'C' }, { rank: 'A', suit: 'H' }]
+  ];
+  const fiveInput = {
+    ...menuInput, subtitle: '五手扑克 · 50币机台', quote: '五手已经同时完成结算。',
+    videoPokerScene: {
+      ...menuInput.videoPokerScene, mode: 'result', variant: '五手扑克', stake: 50, phase: 'complete', hands: fiveHands,
+      handNames: ['J或更好', '三条', '皇家同花顺', '两对', '高牌'], handPayouts: [7.5, 22.5, 6000, 15, 0],
+      totalPayout: 6045, finalPayout: 6045, help: ['.视频扑克 10 / 30 / 50', '.视频扑克 统计']
+    }
+  };
+  const normalizedFive = normalizeView(fiveInput); assert.equal(normalizedFive.videoPokerScene.hands.length, 5); assert.equal(normalizedFive.videoPokerScene.handPayouts[0], 7.5);
+  png = await renderView(fiveInput); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'video-poker-five-hand-preview.png'), png);
+
+  const gambleInput = {
+    ...menuInput, subtitle: 'J或更好 · 翻牌挑战', quote: '点数相同也算失败，可以额外支付游戏币复活。',
+    videoPokerScene: {
+      ...menuInput.videoPokerScene, mode: 'revive', phase: 'revive', previousCard: { rank: '8', suit: 'S' }, drawnCard: { rank: '8', suit: 'D' },
+      guess: '比大', correct: false, pendingPrize: 82.5, streak: 6, reviveCost: 42, help: ['.视频扑克 复活', '.视频扑克 放弃']
+    }
+  };
+  png = await renderView(gambleInput); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'video-poker-high-low-preview.png'), png);
+
+  const statsInput = {
+    ...menuInput, subtitle: '专属统计 · 全机台汇总', quote: 'Jackpot与翻牌记录独立保存在刮刮栏目统计中。',
+    videoPokerScene: {
+      ...menuInput.videoPokerScene, mode: 'stats', phase: 'stats', stats: {
+        plays: 86, hands: 174, handsWon: 61, wagered: 2780, won: 2465, profit: -315, bestPayout: 820,
+        bestHand: '四张2', highLowWins: 38, bestStreak: 9, revives: 11, jackpots: 1, jackpotWon: 728
+      }, help: ['.视频扑克 10 / 30 / 50', '.我的 刮刮']
+    }
+  };
+  png = await renderView(statsInput); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'video-poker-stats-preview.png'), png);
+
+  const scratchStatsInput = {
+    kind: 'stats', title: '刮刮乐 · 详细统计', subtitle: '扑克员的项目档案', quote: '刮刮、彩票、风险游戏与视频扑克统一归入本栏目。',
+    tiles: Array.from({ length: 15 }, (_, index) => ({
+      label: ['总局数', '胜 / 负 / 平', '胜率', '历史最高', '累计项目分', '游戏币净收益', '累计获得好感', '累计失去好感', '好感净变化', '双色球 注 / 中', '双色球 奖金 / 最高', '生死骰 局 / 胜 / 净收益', '视频扑克 局 / 中奖手', '视频扑克 投入 / 实收', '视频扑克 最高 / 最佳牌型'][index],
+      value: ['128', '42 / 79 / 7', '33%', '1000', '5680', '-315', '+4', '-21', '-17', '20 / 3', '1080 / 1000', '6 / 4 / +80', '86 / 61', '2780 / 2465', '820 / 四张2'][index],
+      tone: index % 4 === 0 ? 'accent' : index % 4 === 1 ? 'neutral' : index % 4 === 2 ? 'positive' : 'negative'
+    }))
+  };
+  assert.equal(normalizeView(scratchStatsInput).tiles.length, 15);
+  png = await renderView(scratchStatsInput); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'scratch-stats-preview.png'), png);
+});
+
 test('亡命神抽专用桌面可渲染甲板、强制道具目标与十花色战利品', async () => {
   const suits = ['M', 'T', 'D', 'G', 'C', 'Y', 'B', 'H', 'P', 'Z'];
   const names = ['美人鱼', '藏宝图', '弯刀', '钩子', '船锚', '钥匙', '宝箱', '海怪', '大炮', '占卜球'];
