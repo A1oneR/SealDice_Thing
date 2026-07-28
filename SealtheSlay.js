@@ -815,7 +815,7 @@ function formatGameStatus(game) {
 const spireCmd = seal.ext.newCmdItemInfo();
 spireCmd.name = 'sts';
 spireCmd.aliases = ['尖塔之路'];
-spireCmd.help = `尖塔之路 - 类杀戮尖塔卡牌游戏 (v${ext.version})
+spireCmd.help = `尖塔之路 - 类杀戮尖塔卡牌游戏 (v.what)
 指令:
 .sts start - 开始新游戏或重新开始。
 .sts play <卡牌序号> - 在战斗中打出一张手牌。

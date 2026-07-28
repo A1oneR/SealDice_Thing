@@ -1,0 +1,9 @@
+Use case: stylized-concept
+Asset type: game result card background
+Primary request: a tranquil fishing decision-game background for a dice-maiden affection minigame collection
+Scene/backdrop: quiet river mouth opening toward the sea, wooden fishing platform at the lower edge, reeds and a tackle box near the corners
+Style/medium: polished 2D game background illustration, clean shapes, subtle watercolor paper texture
+Composition/framing: 3:2 landscape, wide unobstructed water and sky area in the center for overlaid UI, environmental details at perimeter
+Lighting/mood: clear early morning light, calm with a hint of risk and adventure
+Color palette: natural blue-green water, pale sky, weathered wood, small coral tackle accents
+Constraints: no people, no character, no readable text, no logos, no watermark, no gradients, center must stay uncluttered

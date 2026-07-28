@@ -1,0 +1,90 @@
+============================================================
+Steam状态查询 SealDice 插件 使用说明
+============================================================
+
+【组成】
+1. steam查询.js       —— SealDice 插件（JS 前端）
+2. steam_render.py    —— Python 图片渲染后端（Flask + Playwright）
+
+【功能】
+- 查询 Steam 玩家状态、正在游玩的游戏、最近两周游玩记录
+- 绑定 SteamID 到 QQ 用户，可用 @某人 快速查询
+- 群内轮询播报状态变化（开始游玩 / 换游戏 / 结束游玩 / 上下线）
+- 支持图片、文本、图文三种输出模式
+- 支持中英指令别名 (.steam / .Steam / .蒸汽)
+
+------------------------------------------------------------
+一、部署 Python 后端
+------------------------------------------------------------
+1. 安装依赖：
+    pip install flask playwright httpx
+    playwright install chromium
+
+2. 启动：
+    python steam_render.py
+    默认监听 http://127.0.0.1:10001
+
+3. 验证：浏览器打开 http://127.0.0.1:10001/health
+   看到 {"status":"ok",...} 即为正常
+
+【备注】若与海豹不同机器，请把地址改为可访问的 IP，并放行 10001 端口。
+       Playwright 首次启动会下载 Chromium，耐心等待。
+
+------------------------------------------------------------
+二、部署 JS 插件
+------------------------------------------------------------
+1. WebUI → 扩展功能 → 上传 steam查询.js
+2. 在插件配置面板填写：
+   - steam_api_key      Steam API Key (https://steamcommunity.com/dev/apikey 申请)
+   - render_backend     图片后端地址，默认空（不出图）；启动后端后填 http://127.0.0.1:10001
+   - output_mode        text=只发文本（默认） / image=只发图 / both=图文都发
+                        image 与 both 必须先配置 render_backend 且后端已启动
+   - enable_broadcast   是否启用群内播报
+   - poll_interval_minutes  轮询间隔（分钟）
+   - notify_game_end    是否播报结束通知
+   - notify_online_offline  是否播报纯上下线
+   - permission_level   user=所有人 / admin=管理员限定
+
+------------------------------------------------------------
+三、指令一览
+------------------------------------------------------------
+.steam bind <SteamID64/自定义URL>   绑定 Steam 账户
+    示例：.steam bind 76561198000000000
+          .steam bind gaben
+          .steam bind https://steamcommunity.com/id/gaben
+
+.steam unbind                       解绑当前账户
+.steam who                          查看自己绑定的Steam
+.steam query [SteamID/@某人]        查询状态（不加参数则查自己）
+.steam recent [SteamID/@某人]       查询近两周游玩
+.steam list                         查看本群已绑定的所有Steam
+.steam broadcast on|off             开启/关闭本群状态播报
+.steam ping                         检测图片后端是否可用
+.steam help                         查看帮助
+
+支持中文子指令：.steam 查询 / 最近 / 列表 / 播报 / 测试
+
+------------------------------------------------------------
+四、卡片风格
+------------------------------------------------------------
+- 状态卡：Steam 官方深蓝渐变 + 头像 + 状态点（正在游戏/在线/离开/忙碌/离线）
+- 最近游玩卡：列表 5 项，含近两周与总时长
+- 播报卡：横向紧凑，颜色区分（开始=绿 / 结束=橙 / 上线=蓝 / 下线=灰）
+
+------------------------------------------------------------
+五、常见问题
+------------------------------------------------------------
+Q: 发出来只有文字没有图片？
+A: 1. 检查 steam_render.py 是否在运行
+   2. 用 .steam ping 检测后端连通性
+   3. 若海豹和后端不在同一机器，render_backend 要用可访问 IP，且 QQ 客户端也要能访问该 URL（因为图片是 QQ 拉取的）
+   4. 检查 output_mode 是否为 text（那样不会发图）
+
+Q: SteamID 怎么获得？
+A: 打开 steamcommunity.com 登录，右上角头像→查看我的资料，URL 里的数字就是 SteamID64。或者在 steamdb.info 等第三方站点用昵称查。
+
+Q: 播报为什么没生效？
+A: 需在 WebUI 全局开启 enable_broadcast，并在群内执行 .steam broadcast on。
+
+Q: Steam API 请求太频繁被限流？
+A: 加大 poll_interval_minutes 配置项，比如改成 5 或 10。

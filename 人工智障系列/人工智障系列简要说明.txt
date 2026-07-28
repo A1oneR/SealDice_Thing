@@ -1,0 +1,38 @@
+确保本机有Python环境，没有的话就去现场装一个，建议使用Python 3.11.9版本（测试环境为该环境）
+记得看更新日志，在txt的最下方
+
+仅在Windows系统上测试完毕，Linux系统等待一个汇报。（更新，Linux请参考压缩包中的方式修改）
+
+Windows食用方法：
+1.打开你的PowerShell，CMD，或者其他类似的东西
+2.安装依赖，输入pip install flask requests pillow openai python-docx PyPDF2 pymupdf，然后按回车，如果还有缺失的依赖请参考pip install xxx指令自行安装
+3.用IDE（记事本）打开logai_server2_13.py，将配置区域的API_KEY，BASE_URL，MODEL替换为你所使用的大模型。
+4.cd到对应的目录下方（例如：cd D:\logai_server），运行这个py，指令是python logai_server2_13.py
+5.将JS插件（较新的Log分析器2_6以及模组分析器2）上传到海豹里面去。
+6.测试指令，看有没有问题在。
+有问题直接来找作者，作者会帮你问AI这是什么情况，当然也可以跳过问作者环节，直接问AI
+
+更新：
+新增以下功能：
+模组翻译，调用LLM将模组翻译成指定语言，可选参数是【覆盖】，即不保留原文
+模组备团，调用LLM进行备团输出
+模组搜索，调用百度网盘API，查阅账户中的文件，具体的Key请进入https://pan.baidu.com/union/console/applist
+模组分析，调用LLM分析模组内容并给与评分。
+模组完善，调用LLM分析模组内容，给出写作建议。
+前文回顾，调用LLM分析log内容给出分析意见。
+
+为了监听上传的群文件需要修改海豹的源码（测试环境为LLonebot分离）
+将压缩包内的文件替换掉/dice下面的同名文件（测试版本为1.5.0）
+记得开HTTP监听从而能够顺利监听到最新的群文件
+
+更新输出图片多元化风格，具体事例请移步到严小姐的空间中。
+更新自定义配置，提示词可交由用户自行书写。
+log分析器2.5，模组分析器2，支持新版1.5.1的海豹。
+更新到logai_server2_10.py，运行的时候看仔细名字。
+
+更新支持Napcat，Linux系统请在python脚本的110行自行替换字体链接，Linux的字体默认路径应该是
+FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+
+感谢群友内鬼以及大D老师提供的Linux教程方案以及结团自动分析插件的示例，需要有一定的动手能力（或许前人已经栽好树了）
+
+更新log分析器到2.6版本，更新logai_server到13版本，更新后的版本无需修改源码，请直接用原先海豹的程序即可。
