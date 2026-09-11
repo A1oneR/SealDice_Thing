@@ -22,6 +22,7 @@ import uuid
 import platform
 import ctypes
 import threading
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import requests
@@ -30,6 +31,10 @@ from urllib3.util.retry import Retry
 from flask import Flask, request, send_file, jsonify
 from PIL import Image, ImageDraw, ImageFont
 from openai import OpenAI
+try:
+    from token_stats import TokenLedger, apply_user_display_names, module_from_mode, render_rankings
+except ImportError:
+    from .token_stats import TokenLedger, apply_user_display_names, module_from_mode, render_rankings
 # 新增依赖
 import PyPDF2
 import urllib.parse
@@ -228,6 +233,10 @@ DEFAULT_SYSTEM_PROMPT = """
 
            风格要求：幽默、犀利、像老练的调查员在写结案报告。当日志内容是DND时，将KP寄语替换成DM寄语。
     """
+
+LOG_SCORE_PRECISION_REQUIREMENT = """
+【六维评分精度要求】：六维分数必须是基于日志证据的精确整数，允许使用任意个位数（例如 63、78、91）。不要为了整齐而四舍五入，也不要批量使用整 5、整 10 或相同分数；只有证据确实相同时才可以给出相同分数。
+"""
 
 # 字体路径
 FONT_PATH = "C:/Windows/Fonts/msyh.ttc" 
@@ -485,6 +494,22 @@ client = OpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL)
 # 备用模型客户端；默认仍指向原 DS 配置。
 ds_client = OpenAI(api_key=DS_API_KEY, base_url=DS_BASE_URL)
 backup_client = ds_client
+TOKEN_LEDGER = TokenLedger(os.getenv(
+    "LOGAI_TOKEN_LEDGER",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "token_usage.jsonl")
+))
+
+def record_token_usage(response, messages, *, module="other", model="", user_key="", user_name="",
+                       group_key="", prompt_name="", prompt="", job_id=""):
+    try:
+        return TOKEN_LEDGER.record(
+            response, messages,
+            module=module, model=model, user_key=user_key, user_name=user_name,
+            group_key=group_key, prompt_name=prompt_name, prompt=prompt, job_id=job_id,
+        )
+    except Exception as exc:
+        print(f"[{job_id}] Token usage recording failed (ignored): {exc}")
+        return None
 
 # 任务队列与缓存
 executor = ThreadPoolExecutor(max_workers=4) # 允许同时处理4个分析任务
@@ -581,8 +606,41 @@ def format_raw_text(raw_text):
             if l: clean.append(l)
     return "\n".join(clean)
 
+def fetch_and_join_logs(log_sources, key=None, password=None, source=None):
+    """按用户给定顺序读取多个 Log，并用明确分隔线拼接。"""
+    sources = log_sources if isinstance(log_sources, list) and log_sources else [
+        {'key': key, 'password': password, 'source': source}
+    ]
+    parts = []
+    failures = []
+    for index, item in enumerate(sources, 1):
+        item = item if isinstance(item, dict) else {'key': item}
+        item_key = str(item.get('key') or '').strip()
+        item_source = str(item.get('source') or '').strip().lower()
+        item_password = item.get('password')
+        if not item_key:
+            failures.append(f'第{index}段缺少 key')
+            continue
+        try:
+            if not item_source:
+                if '-' in item_key and item_key.split('-', 1)[0].isdigit(): item_source = 'trpgbot'
+                elif '_' in item_key or len(item_key) > 20: item_source = 'kokona'
+                else: item_source = 'weizaima'
+            if item_source == 'kokona': raw = fetch_kokona(item_key)
+            elif item_source == 'trpgbot': raw = fetch_trpgbot(item_key)
+            else: raw = fetch_weizaima(item_key, item_password)
+            text = format_raw_text(raw) if item_source != 'weizaima' else format_weizaima_text(raw)
+            if text.strip(): parts.append(f'【第{index}段 Log】\n{text.strip()}')
+            else: failures.append(f'第{index}段读取为空')
+        except Exception as exc:
+            failures.append(f'第{index}段读取失败: {exc}')
+    if not parts:
+        detail = '；'.join(failures)
+        raise Exception(f'日志内容获取失败或为空{("：" + detail) if detail else ""}')
+    return '\n\n========== Log 顺序拼接分隔线 ==========\n\n'.join(parts), failures
+
 # --- 核心处理任务 ---
-def background_process(job_id, key, password, source, is_pro=False, is_kind=False, mode='analyze', persona="", custom_prompt="", theme='default', is_ds=False, group_key="", backup_model=""):
+def background_process(job_id, key, password, source, is_pro=False, is_kind=False, mode='analyze', persona="", custom_prompt="", theme='default', is_ds=False, group_key="", backup_model="", user_key="", user_name="", custom_name="", token_module="", log_sources=None):
     """后台线程：执行 Log 下载、分析、绘图"""
     print(f"[{job_id}] 开始处理Log... Source: {source}, Mode: {mode}")
     try:
@@ -590,7 +648,8 @@ def background_process(job_id, key, password, source, is_pro=False, is_kind=Fals
         hash_key = None
         if not is_pro:
             # 只有普通模式参与缓存，确保同一个Log和同样的提示配置拥有唯一签名
-            hash_str = f"url_log_{key}_{mode}_{is_kind}_{persona}_{custom_prompt}_{theme}_{is_ds}_{backup_model}"
+            source_signature = json.dumps(log_sources or [], ensure_ascii=False, sort_keys=True, default=str)
+            hash_str = f"url_log_v3_{key}_{source_signature}_{mode}_{is_kind}_{persona}_{custom_prompt}_{theme}_{is_ds}_{backup_model}"
             hash_key = hashlib.md5(hash_str.encode('utf-8')).hexdigest()
             cached_images = get_daily_cache(hash_key)
             if cached_images:
@@ -599,13 +658,9 @@ def background_process(job_id, key, password, source, is_pro=False, is_kind=Fals
                 JOB_CACHE[job_id]['images'] = cached_images
                 return
         # ========================================================
-        log_text = ""
-        if source == "kokona":
-            log_text = format_raw_text(fetch_kokona(key))
-        elif source == "trpgbot":
-            log_text = format_raw_text(fetch_trpgbot(key))
-        elif source == "weizaima":
-            log_text = format_weizaima_text(fetch_weizaima(key, password))
+        log_text, source_failures = fetch_and_join_logs(log_sources, key, password, source)
+        if source_failures:
+            print(f"[{job_id}] 部分 Log 读取失败（已跳过）: {'；'.join(source_failures)}")
         
         if not log_text:
             raise Exception("日志内容获取失败或为空")
@@ -649,6 +704,7 @@ def background_process(job_id, key, password, source, is_pro=False, is_kind=Fals
             if is_kind: system_prompt = KIND_SYSTEM_PROMPT
             elif is_pro: system_prompt = PRO_SYSTEM_PROMPT
             else: system_prompt = DEFAULT_SYSTEM_PROMPT
+            system_prompt += LOG_SCORE_PRECISION_REQUIREMENT
         
         # 核心：人设系统劫持（强制带入骰娘语气且防止格式崩溃）
         if persona:
@@ -680,17 +736,20 @@ def background_process(job_id, key, password, source, is_pro=False, is_kind=Fals
             current_model = AI_MODEL_PRO if is_pro else AI_MODEL
             max_t = 65535
 
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": log_text_ai}]
         resp = current_client.chat.completions.create(
             model=current_model,
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": log_text_ai}],
+            messages=messages,
             temperature=1.0, max_tokens=max_t
         )
+        usage_record = record_token_usage(
+            resp, messages, module=token_module or module_from_mode(mode), model=current_model,
+            user_key=user_key, user_name=user_name, group_key=group_key,
+            prompt_name=custom_name or ("温柔模式" if is_kind else "默认提示词"),
+            prompt=custom_prompt or system_prompt, job_id=job_id,
+        )
         result_text = resp.choices[0].message.content
-
-        try:
-            token_usage = f" | Tokens: {resp.usage.total_tokens}"
-        except:
-            token_usage = ""
+        token_usage = f" | Tokens: {usage_record['total_tokens']}" if usage_record else ""
         
         result_text, final_theme = extract_theme_from_text(result_text, theme)
 
@@ -1054,7 +1113,7 @@ def extract_text_from_file(file_content, filename, card_system="auto"):
         
     return text
 
-def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=False, is_kind=False, persona="", custom_prompt="", theme='default', is_ds=False, group_key="", user_key="", card_system="auto", backup_model="", backup_label=""):
+def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=False, is_kind=False, persona="", custom_prompt="", theme='default', is_ds=False, group_key="", user_key="", custom_name="", card_system="auto", backup_model="", backup_label="", user_name="", token_module=""):
     """后台任务：下载文件并根据模式进行分析，支持多模态原生文档阅读与输出多图"""
     print(f"[{job_id}] 开始处理文件: {filename}, Mode: {mode}")
     try:
@@ -1157,6 +1216,7 @@ def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=F
             if is_kind: system_prompt = KIND_SYSTEM_PROMPT
             elif is_pro: system_prompt = PRO_SYSTEM_PROMPT
             else: system_prompt = DEFAULT_SYSTEM_PROMPT
+            system_prompt += LOG_SCORE_PRECISION_REQUIREMENT
 
         elif mode == 'sheet_score':
             # 【新增】：角色卡评分模式（读取姓名/年龄/属性/技能/背景故事并打分）
@@ -1276,19 +1336,23 @@ def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=F
             current_model = AI_MODEL_PRO if is_pro else AI_MODEL
             max_t = 65535
 
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ]
         resp = current_client.chat.completions.create(
             model=current_model,
-            messages=[
-                {"role": "system", "content": system_prompt}, 
-                {"role": "user", "content": user_content}
-            ],
+            messages=messages,
             temperature=1.0, max_tokens=max_t
         )
+        usage_record = record_token_usage(
+            resp, messages, module=token_module or module_from_mode(mode), model=current_model,
+            user_key=user_key, user_name=user_name, group_key=group_key,
+            prompt_name=custom_name or ("温柔模式" if is_kind else "默认提示词"),
+            prompt=custom_prompt or system_prompt, job_id=job_id,
+        )
         result_text = resp.choices[0].message.content
-        try:
-            token_usage = f" | Tokens: {resp.usage.total_tokens}"
-        except:
-            token_usage = ""
+        token_usage = f" | Tokens: {usage_record['total_tokens']}" if usage_record else ""
         
         result_text, final_theme = extract_theme_from_text(result_text, theme)
 
@@ -1350,6 +1414,9 @@ def translate_task():
     filename = request.args.get('filename', 'unknown')
     target_lang = request.args.get('lang', 'zh-CN')
     is_pro = request.args.get('pro', 'false').lower() == 'true'
+    user_key = str(request.args.get('user_key', '') or '')[:64]
+    user_name = str(request.args.get('user_name', '') or '')[:80]
+    group_key = str(request.args.get('group_key', '') or '')[:64]
     
     if not file_url:
         return jsonify({'status': 'error', 'msg': '缺少文件URL'})
@@ -1357,11 +1424,11 @@ def translate_task():
     job_id = str(uuid.uuid4())
     JOB_CACHE[job_id] = {'status': 'processing', 'created': time.time()}
     
-    executor.submit(background_translate_process, job_id, file_url, filename, target_lang, is_pro)
+    executor.submit(background_translate_process, job_id, file_url, filename, target_lang, is_pro, user_key, user_name, group_key)
     
     return jsonify({'status': 'ok', 'id': job_id, 'msg': f'正在翻译为 {target_lang}...'})
 
-def background_translate_process(job_id, file_url, filename, target_lang='zh-CN', is_pro=False):
+def background_translate_process(job_id, file_url, filename, target_lang='zh-CN', is_pro=False, user_key="", user_name="", group_key=""):
     """后台线程：下载并翻译文件"""
     print(f"[{job_id}] 开始翻译文件: {filename} -> {target_lang}")
     try:
@@ -1388,13 +1455,19 @@ def background_translate_process(job_id, file_url, filename, target_lang='zh-CN'
         
         translate_prompt = f"{lang_hint}\n请将以下文本翻译成{target_lang}：\n\n{file_text}"
         
+        messages = [
+            {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
+            {"role": "user", "content": translate_prompt}
+        ]
         resp = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
-                {"role": "user", "content": translate_prompt}
-            ],
+            messages=messages,
             temperature=0.5, max_tokens=4000
+        )
+        record_token_usage(
+            resp, messages, module="translate", model=model,
+            user_key=user_key, user_name=user_name, group_key=group_key,
+            prompt_name="文件翻译", prompt=TRANSLATE_SYSTEM_PROMPT, job_id=job_id,
         )
         result_text = resp.choices[0].message.content
         
@@ -1430,6 +1503,9 @@ def translate_and_upload():
     is_pro = request.args.get('pro', 'false').lower() == 'true'
     overwrite = request.args.get('overwrite', 'false').lower() == 'true'
     upload_baseurl = request.args.get('upload_url', '')
+    user_key = str(request.args.get('user_key', '') or '')[:64]
+    user_name = str(request.args.get('user_name', '') or '')[:80]
+    group_key = str(request.args.get('group_key', '') or group_id)[:64]
     
     if not file_url:
         return jsonify({'status': 'error', 'msg': '缺少文件URL'})
@@ -1440,13 +1516,13 @@ def translate_and_upload():
     job_id = str(uuid.uuid4())
     JOB_CACHE[job_id] = {'status': 'processing', 'created': time.time()}
     
-    executor.submit(background_translate_and_upload, job_id, file_url, filename, target_lang, group_id, upload_baseurl, is_pro, overwrite)
+    executor.submit(background_translate_and_upload, job_id, file_url, filename, target_lang, group_id, upload_baseurl, is_pro, overwrite, user_key, user_name, group_key)
 
     mode_msg = "覆盖模式" if overwrite else "注释模式"
     return jsonify({'status': 'ok', 'id': job_id, 'msg': f'正在翻译并上传到群文件...({mode_msg})'})
 
 
-def translate_and_save_file(job_id, file_bytes, original_filename, target_lang, is_pro=False, overwrite=False):
+def translate_and_save_file(job_id, file_bytes, original_filename, target_lang, is_pro=False, overwrite=False, user_key="", user_name="", group_key=""):
     """根据文件类型翻译并保存"""
     import os
     import tempfile
@@ -1530,10 +1606,16 @@ def translate_and_save_file(job_id, file_bytes, original_filename, target_lang, 
                 batch_text = "\n---\n".join(batch)
                 prompt = f"{lang_hint}\n请将以下文本翻译成{target_lang}，保持每行对应（用---分隔）：\n{batch_text}"
                 
+                messages = [{"role": "system", "content": TRANSLATE_SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
                 resp = client.chat.completions.create(
                     model=model,
-                    messages=[{"role": "system", "content": TRANSLATE_SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                    messages=messages,
                     temperature=0.5, max_tokens=4000
+                )
+                record_token_usage(
+                    resp, messages, module="translate", model=model,
+                    user_key=user_key, user_name=user_name, group_key=group_key,
+                    prompt_name="PDF 分批翻译", prompt=TRANSLATE_SYSTEM_PROMPT, job_id=job_id,
                 )
                 
                 translated_batch = resp.choices[0].message.content.split('\n---\n')
@@ -1686,10 +1768,16 @@ def translate_and_save_file(job_id, file_bytes, original_filename, target_lang, 
                 batch = original_paragraphs[i:i+batch_size]
                 batch_text = "\n".join(batch)
                 prompt = f"{lang_hint}\n请翻译以下内容成{target_lang}：\n{batch_text}"
+                messages = [{"role": "system", "content": TRANSLATE_SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
                 resp = client.chat.completions.create(
                     model=model,
-                    messages=[{"role": "system", "content": TRANSLATE_SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                    messages=messages,
                     temperature=0.5, max_tokens=65535
+                )
+                record_token_usage(
+                    resp, messages, module="translate", model=model,
+                    user_key=user_key, user_name=user_name, group_key=group_key,
+                    prompt_name="DOCX 分批翻译", prompt=TRANSLATE_SYSTEM_PROMPT, job_id=job_id,
                 )
                 translated_paragraphs.extend(resp.choices[0].message.content.split('\n'))
             
@@ -1720,10 +1808,16 @@ def translate_and_save_file(job_id, file_bytes, original_filename, target_lang, 
     file_text = file_content[:MAX_AI_CHARS] if len(file_content) > MAX_AI_CHARS else file_content
     prompt = f"{lang_hint}\n请将以下文本翻译成{target_lang}，保持原有格式：\n{file_text}"
     
+    messages = [{"role": "system", "content": TRANSLATE_SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
     resp = client.chat.completions.create(
         model=model,
-        messages=[{"role": "system", "content": TRANSLATE_SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+        messages=messages,
         temperature=0.5, max_tokens=65535
+    )
+    record_token_usage(
+        resp, messages, module="translate", model=model,
+        user_key=user_key, user_name=user_name, group_key=group_key,
+        prompt_name="文本翻译", prompt=TRANSLATE_SYSTEM_PROMPT, job_id=job_id,
     )
     result_text = resp.choices[0].message.content
     
@@ -1735,7 +1829,7 @@ def translate_and_save_file(job_id, file_bytes, original_filename, target_lang, 
     
     return temp_file_path, new_filename
 
-def background_translate_and_upload(job_id, file_url, filename, target_lang, group_id, upload_baseurl, is_pro=False, overwrite=False):
+def background_translate_and_upload(job_id, file_url, filename, target_lang, group_id, upload_baseurl, is_pro=False, overwrite=False, user_key="", user_name="", group_key=""):
     """后台线程：下载、翻译并上传文件"""
     print(f"[{job_id}] 开始翻译上传: {filename} -> {target_lang} -> group {group_id}, 覆盖模式: {overwrite}")
     
@@ -1750,7 +1844,10 @@ def background_translate_and_upload(job_id, file_url, filename, target_lang, gro
         file_bytes = resp.content
             
         # 翻译并生成新文件
-        temp_file_path, new_filename = translate_and_save_file(job_id, file_bytes, filename, target_lang, is_pro, overwrite)
+        temp_file_path, new_filename = translate_and_save_file(
+            job_id, file_bytes, filename, target_lang, is_pro, overwrite,
+            user_key, user_name, group_key,
+        )
         
         try:
             # 等待确保文件关闭
@@ -2365,18 +2462,32 @@ def background_search_module(job_id, keyword, is_local, group_id, upload_baseurl
                         arcname = os.path.join(group_folder_name, os.path.relpath(file_path, group_folder_path))
                         zipf.write(file_path, arcname)
 
-            sess = get_session()
-            upload_url = f"{upload_baseurl}/upload_group_file?group_id={group_id}&file=file://{final_upload_path}&name={urllib.parse.quote(final_filename)}"
-            upload_resp = sess.get(upload_url, timeout=300).json() 
-
-            if upload_resp.get('status') == 'ok':
+            # Official QQ does not expose OneBot's /upload_group_file action.
+            # Keep the archive until the core downloads it and uploads it via
+            # the official group /files endpoint.
+            if str(upload_baseurl).strip().lower() == 'official':
+                JOB_CACHE[job_id]['download_path'] = final_upload_path
+                JOB_CACHE[job_id]['download_name'] = final_filename
                 JOB_CACHE[job_id]['status'] = 'done'
-                JOB_CACHE[job_id]['msg'] = f"✅ 已将内容归档为【{final_filename}】并上传至群文件！\n包含以下内容：\n{names_display}"
+                JOB_CACHE[job_id]['download_url'] = f"/api/module_download?id={urllib.parse.quote(job_id)}"
+                JOB_CACHE[job_id]['msg'] = f"✅ 已生成【{final_filename}】，正在通过官方 Bot 上传到群文件！\n包含以下内容：\n{names_display}"
+                temp_dir = None
             else:
-                raise Exception(f"群文件上传失败: {upload_resp}")
-                
+                sess = get_session()
+                upload_url = f"{upload_baseurl}/upload_group_file?group_id={group_id}&file=file://{final_upload_path}&name={urllib.parse.quote(final_filename)}"
+                upload_resp = sess.get(upload_url, timeout=300).json()
+
+                if upload_resp.get('status') == 'ok':
+                    JOB_CACHE[job_id]['status'] = 'done'
+                    JOB_CACHE[job_id]['msg'] = f"✅ 已将内容归档为【{final_filename}】并上传至群文件！\n包含以下内容：\n{names_display}"
+                else:
+                    raise Exception(f"群文件上传失败: {upload_resp}")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                temp_dir = None
+
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     except Exception as e:
         print(f"[{job_id}] 搜索处理失败: {e}")
@@ -2426,6 +2537,15 @@ def submit_task():
     theme = req_data.get('theme', 'default')
     group_key = str(req_data.get('group_key', '') or '')
     backup_model = str(req_data.get('backup_model', '') or '')
+    user_key = str(req_data.get('user_key', '') or '')[:64]
+    user_name = str(req_data.get('user_name', '') or '')[:80]
+    custom_name = str(req_data.get('custom_name', '') or '')[:80]
+    token_module = str(req_data.get('token_module', '') or '')[:60]
+    log_sources = req_data.get('log_sources')
+    if not isinstance(log_sources, list):
+        log_sources = None
+    else:
+        log_sources = [item for item in log_sources[:20] if isinstance(item, dict)][:20]
 
     if not source:
         if key and '-' in key and key.split('-')[0].isdigit(): source = "trpgbot"
@@ -2436,7 +2556,7 @@ def submit_task():
     JOB_CACHE[job_id] = {'status': 'processing', 'created': time.time()}
     
     # 将所有参数（包括 theme、group_key）传入后台线程
-    executor.submit(background_process, job_id, key, password, source, is_pro, is_kind, mode, persona, custom_prompt, theme, is_ds, group_key, backup_model)
+    executor.submit(background_process, job_id, key, password, source, is_pro, is_kind, mode, persona, custom_prompt, theme, is_ds, group_key, backup_model, user_key, user_name, custom_name, token_module, log_sources)
     return jsonify({'status': 'ok', 'id': job_id})
 
 
@@ -2455,9 +2575,12 @@ def submit_file_task():
     is_ds = str(req_data.get('ds', 'false')).lower() == 'true'
     persona = req_data.get('persona', '')
     custom_prompt = req_data.get('custom_prompt', '')
+    custom_name = str(req_data.get('custom_name', '') or '')[:80]
     theme = req_data.get('theme', 'default')
     group_key = str(req_data.get('group_key', '') or '')
     user_key = str(req_data.get('user_key', '') or '')
+    user_name = str(req_data.get('user_name', '') or '')[:80]
+    token_module = str(req_data.get('token_module', '') or '')[:60]
     backup_model = str(req_data.get('backup_model', '') or '')
     backup_label = str(req_data.get('backup_label', '') or '')[:40]
     card_system = str(req_data.get('card_system', 'auto') or 'auto').strip().lower()
@@ -2471,7 +2594,7 @@ def submit_file_task():
     JOB_CACHE[job_id] = {'status': 'processing', 'created': time.time()}
     
     # 将所有参数（包括 theme、group_key、user_key）传入后台线程
-    executor.submit(background_file_process, job_id, file_url, filename, mode, is_pro, is_kind, persona, custom_prompt, theme, is_ds, group_key, user_key, card_system, backup_model, backup_label)
+    executor.submit(background_file_process, job_id, file_url, filename, mode, is_pro, is_kind, persona, custom_prompt, theme, is_ds, group_key, user_key, custom_name, card_system, backup_model, backup_label, user_name, token_module)
     return jsonify({'status': 'ok', 'id': job_id})
 
 
@@ -2588,7 +2711,30 @@ def check_status():
     # 【新增】：若为角色卡评分任务，把姓名/年龄/分数/品质一并返回给前端
     if 'summary' in job:
         resp_data['summary'] = job['summary']
+    if 'download_url' in job:
+        resp_data['download_url'] = job['download_url']
     return jsonify(resp_data)
+
+@app.route('/api/module_download', methods=['GET'])
+def module_download():
+    """一次性提供模组搜索生成的压缩包，供官方 Bot 核心上传到群文件。"""
+    job_id = request.args.get('id', '')
+    job = JOB_CACHE.get(job_id)
+    path = job.get('download_path') if job else None
+    if not path or not os.path.isfile(path):
+        return jsonify({'status': 'not_found', 'msg': '压缩包不存在或已过期'}), 404
+
+    def cleanup():
+        try:
+            temp_dir = os.path.dirname(path)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            job.pop('download_path', None)
+        except Exception as exc:
+            app.logger.warning('清理模组临时压缩包失败: %s', exc)
+
+    # 留出官方 Bot 下载并上传的时间，避免响应刚建立就删除临时文件。
+    threading.Timer(600, cleanup).start()
+    return send_file(path, as_attachment=True, download_name=job.get('download_name', 'module.zip'))
 
 @app.route('/api/result', methods=['GET'])
 def get_result():
@@ -2722,15 +2868,16 @@ def background_session_review(job_id, payload):
         if payload.get('api_key'):
             headers['Authorization'] = f'Bearer {api_key}'
 
+        messages = [
+            {'role': 'system', 'content': payload['system_prompt']},
+            {'role': 'user', 'content': json.dumps(payload['dataset'], ensure_ascii=False)}
+        ]
         response = requests.post(
             api_url,
             headers=headers,
             json={
                 'model': model,
-                'messages': [
-                    {'role': 'system', 'content': payload['system_prompt']},
-                    {'role': 'user', 'content': json.dumps(payload['dataset'], ensure_ascii=False)}
-                ],
+                'messages': messages,
                 'temperature': max(0.0, min(2.0, float(payload.get('temperature', 0.3)))),
                 'max_tokens': max(128, min(8192, int(payload.get('max_tokens', 1600))))
             },
@@ -2738,6 +2885,12 @@ def background_session_review(job_id, payload):
         )
         response.raise_for_status()
         response_data = response.json()
+        record_token_usage(
+            response_data, messages, module="session_review", model=model,
+            user_key=payload.get('user_key', ''), user_name=payload.get('user_name', ''),
+            group_key=payload.get('group_key', ''), prompt_name=payload.get('prompt_name', '跑团复盘'),
+            prompt=payload['system_prompt'], job_id=job_id,
+        )
         content = _session_review_content(response_data['choices'][0]['message']['content'])
         if not content:
             raise ValueError('复盘服务返回中没有可读文本')
@@ -2797,6 +2950,51 @@ def session_review_task():
     JOB_CACHE[job_id] = {'status': 'processing', 'created': time.time()}
     review_executor.submit(background_session_review, job_id, normalized_payload)
     return jsonify({'status': 'ok', 'id': job_id})
+
+
+@app.route('/api/token_stats', methods=['GET'])
+def token_stats_summary():
+    """Return aggregated Token statistics without exposing full prompts."""
+    if not _is_local_plugin_request():
+        return jsonify({'status': 'error', 'msg': '该接口只接受本机插件请求'}), 403
+    try:
+        days = max(0, min(3650, int(request.args.get('days', 30))))
+        limit = max(1, min(50, int(request.args.get('limit', 15))))
+        return jsonify({'status': 'ok', **TOKEN_LEDGER.summary(days=days or None, limit=limit)})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'msg': str(exc)})
+
+
+@app.route('/api/token_rankings', methods=['GET', 'POST'])
+def token_rankings_image():
+    """Render user and module Token ranking images into the normal job result cache."""
+    if not _is_local_plugin_request():
+        return jsonify({'status': 'error', 'msg': '该接口只接受本机插件请求'}), 403
+    try:
+        days = max(0, min(3650, int(request.args.get('days', 30))))
+        limit = max(1, min(30, int(request.args.get('limit', 15))))
+        display_names = {}
+        if request.method == 'POST':
+            body = request.get_json(silent=True) or {}
+            display_names = body.get('user_names') or {}
+        else:
+            raw_names = request.args.get('user_names', '')
+            if raw_names:
+                try:
+                    display_names = json.loads(raw_names)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    display_names = {}
+        summary = TOKEN_LEDGER.summary(days=days or None, limit=limit)
+        apply_user_display_names(summary, display_names)
+        images = render_rankings(summary, FONT_PATH)
+        job_id = str(uuid.uuid4())
+        JOB_CACHE[job_id] = {'status': 'done', 'created': time.time(), 'images': images}
+        return jsonify({
+            'status': 'ok', 'id': job_id, 'image_count': len(images),
+            'calls': summary['calls'], 'total_tokens': summary['total_tokens'],
+        })
+    except Exception as exc:
+        return jsonify({'status': 'error', 'msg': str(exc)})
 
 def background_session_archive(job_id, target_url, token, payload, request_timeout):
     try:

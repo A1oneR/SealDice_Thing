@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         人工智障模组分析器(修复版)
 // @author       Air, Cursor
-// @version      1.2.1
+// @version      1.2.3
 // @description  识别上传的模组文件，使用 .模组分析 指令进行解读。
 // @timestamp    1700000010
 // @license      MIT
@@ -9,7 +9,7 @@
 
 let ext = seal.ext.find('file-analyzer');
 if (!ext) {
-  ext = seal.ext.new('file-analyzer', 'Air', '1.2.1');
+  ext = seal.ext.new('file-analyzer', 'Air', '1.2.3');
   seal.ext.register(ext);
 }
 
@@ -30,6 +30,37 @@ seal.ext.registerIntConfig(ext, "每日单人Pro限额", 3, "每天每个普通�
 
 // 辅助函数：等待
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function resolveCompatIdentity(kind, identity) {
+    const value = String(identity || '');
+    if (!value) return value;
+    try {
+        const api = globalThis.SealOfficialQQIdentityBridge;
+        if (api) {
+            const resolved = kind === 'user' ? api.resolveUserId(value) : api.resolveGroupId(value);
+            if (resolved) return String(resolved);
+        }
+    } catch (e) {}
+    try {
+        const bridge = seal.ext.find('qq-official-name-bridge');
+        if (!bridge) return value;
+        const official = kind === 'user' ? /^OpenQQ(?::|CH:)/.test(value) : /^OpenQQ-Group:/.test(value);
+        if (!official) return value;
+        return String(bridge.storageGet(`binding:${kind}:${value}`) || value);
+    } catch (e) {
+        return value;
+    }
+}
+function compatUserId(identity) { return resolveCompatIdentity('user', identity); }
+function compatGroupId(identity) { return resolveCompatIdentity('group', identity); }
+function requireOfficialQQBinding(ctx, msg, featureName) {
+    const userId = String(ctx && ctx.player && ctx.player.userId || '');
+    if (!/^OpenQQ(?::|CH:)/.test(userId)) return true;
+    const api = globalThis.SealOfficialQQIdentityBridge;
+    if (api && typeof api.requireUserBinding === 'function') return api.requireUserBinding(ctx, msg, featureName);
+    seal.replyToSender(ctx, msg, `${featureName || '该功能'}需要先绑定原QQ号。\n请先加载QQ官方Bot昵称桥接插件，再发送：.QQ绑定 <原QQ号>`);
+    return false;
+}
 
 // NapCat 等会在 CQ:file 末尾带 url=直链（URL 内可能有逗号），不能用简单 split
 function parseCQFileInner(inner) {
@@ -62,6 +93,28 @@ async function safeFetchJson(url, options, tag) {
     }
 }
 
+async function resolveRealUserNickname(ctx, userId) {
+    const resolvedUserId = compatUserId(userId);
+    const id = String(resolvedUserId || '').replace(/^QQ:/, '');
+    if (!id) return '';
+    if (!/^\d+$/.test(id)) {
+        const currentId = compatUserId(ctx && ctx.player && ctx.player.userId);
+        return currentId === resolvedUserId && ctx && ctx.player ? String(ctx.player.name || '').trim() : '';
+    }
+    try {
+        let api = seal.ext.getStringConfig(ext, "OneBot_API_地址") || '';
+        api = api.replace(/\/$/, '');
+        const result = await safeFetchJson(`${api}/get_stranger_info`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: /^\d+$/.test(id) ? parseInt(id, 10) : id, no_cache: true })
+        }, '获取用户真实昵称');
+        return String((result && result.data && (result.data.nickname || result.data.nick)) || '').trim();
+    } catch (e) {
+        console.warn('[模组分析] 获取真实昵称失败:', e);
+        return '';
+    }
+}
+
 async function resolveModuleFileDownloadUrl(onebotApiUrl, onebotGroupId, fileData) {
     const du = fileData && fileData.direct_url ? String(fileData.direct_url).trim() : "";
     if (du && /^https?:\/\//i.test(du)) return du;
@@ -84,7 +137,8 @@ async function resolveModuleFileDownloadUrl(onebotApiUrl, onebotGroupId, fileDat
 
 // --- 统一的文件处理底层函数 ---
 async function processModuleFile(ctx, msg, cmdArgs, modeName, pythonMode) {
-    let groupId = ctx.group.groupId;
+    let groupId = compatGroupId(ctx.group.groupId);
+    let userId = compatUserId(ctx.player.userId);
     if (!groupId.includes('Group')) {
         seal.replyToSender(ctx, msg, '❌ 请在群聊中使用此功能。');
         return true;
@@ -133,7 +187,7 @@ async function processModuleFile(ctx, msg, cmdArgs, modeName, pythonMode) {
         return d.getUTCFullYear() + '-' + (d.getUTCMonth() + 1) + '-' + d.getUTCDate();
     })();
     let globalKey = `logai_pro_usage_${dateStr}_global`;
-    let userKey = `logai_pro_usage_${dateStr}_${ctx.player.userId}`;
+    let userKey = `logai_pro_usage_${dateStr}_${userId}`;
 
     if (isPro) {
         let globalLimit = seal.ext.getIntConfig(ext, "每日Pro全局限额");
@@ -199,6 +253,10 @@ async function processModuleFile(ctx, msg, cmdArgs, modeName, pythonMode) {
     try {
         let onebotApiUrl = seal.ext.getStringConfig(ext, "OneBot_API_地址");
         if (onebotApiUrl.endsWith('/')) onebotApiUrl = onebotApiUrl.slice(0, -1);
+        if (!fileData.direct_url && !/^QQ-Group:\d+$/.test(groupId)) {
+            seal.replyToSender(ctx, msg, '❌ 官Bot群文件没有可用直链。请先使用 .QQ群绑定 <原QQ群号> 绑定后再试。');
+            return true;
+        }
         let onebotGroupId = parseInt(groupId.replace('QQ-Group:', ''));
         
         const downloadUrl = await resolveModuleFileDownloadUrl(onebotApiUrl, onebotGroupId, fileData);
@@ -208,6 +266,7 @@ async function processModuleFile(ctx, msg, cmdArgs, modeName, pythonMode) {
         }
 
         // 构建 POST Payload，加入自定义提示词
+        let realUserName = await resolveRealUserNickname(ctx, userId);
         let payload = {
             url: downloadUrl,
             filename: filename,
@@ -215,7 +274,12 @@ async function processModuleFile(ctx, msg, cmdArgs, modeName, pythonMode) {
             pro: isPro,
             kind: isKind,
             persona: personaStr,
-            custom_prompt: customPromptContent
+            custom_prompt: customPromptContent,
+            custom_name: customName,
+            user_key: String(userId || '').replace(/^QQ:/, ''),
+            user_name: realUserName || String(ctx.player.name || '').trim() || '匿名用户',
+            group_key: String(groupId || '').replace(/^QQ-Group:/, ''),
+            token_module: pythonMode === 'prepare' ? 'module_prepare' : (pythonMode === 'refine' ? 'module_refine' : 'module_analyze')
         };
 
         let pythonApiUrl = `http://127.0.0.1:8000/api/submit_file`;
@@ -273,6 +337,7 @@ const cmdFile = seal.ext.newCmdItemInfo();
 cmdFile.name = '模组分析';
 cmdFile.help = '分析最近上传的群文件。\n用法: .模组分析 [配置名] [选项]\n选项：pro, 温柔, ai\n配置管理请使用 .模组分析 配置 示例';
 cmdFile.solve = async (ctx, msg, cmdArgs) => {
+    if (!requireOfficialQQBinding(ctx, msg, '模组分析')) return seal.ext.newCmdExecuteResult(true);
     // 【拦截 .模组分析 配置 子指令】
     let val1 = cmdArgs.getArgN(1);
     if (val1 === '配置') {
@@ -281,7 +346,7 @@ cmdFile.solve = async (ctx, msg, cmdArgs) => {
         let prompts = {};
         try { prompts = JSON.parse(stored); } catch (e) {}
 
-        let userId = ctx.player.userId;
+        let userId = compatUserId(ctx.player.userId);
         let userName = ctx.player.name;
         let isAdmin = ctx.privilegeLevel >= 100;
 
@@ -420,6 +485,7 @@ const cmdPrepare = seal.ext.newCmdItemInfo();
 cmdPrepare.name = '模组备团';
 cmdPrepare.help = '对新上传的模组进行分图梳理：背景、梗概、NPC关系、场景、带团建议。\n选项：pro, ai';
 cmdPrepare.solve = async (ctx, msg, cmdArgs) => {
+    if (!requireOfficialQQBinding(ctx, msg, '模组备团')) return seal.ext.newCmdExecuteResult(true);
     return await processModuleFile(ctx, msg, cmdArgs, '备团资料梳理', 'prepare');
 };
 ext.cmdMap['模组备团'] = cmdPrepare;
@@ -430,6 +496,7 @@ const cmdRefine = seal.ext.newCmdItemInfo();
 cmdRefine.name = '模组完善';
 cmdRefine.help = '对未写完的模组进行审查：进度预估、写作建议、具体示例润色。\n选项：pro, ai';
 cmdRefine.solve = async (ctx, msg, cmdArgs) => {
+    if (!requireOfficialQQBinding(ctx, msg, '模组完善')) return seal.ext.newCmdExecuteResult(true);
     return await processModuleFile(ctx, msg, cmdArgs, '写作进度审查与润色', 'refine');
 };
 ext.cmdMap['模组完善'] = cmdRefine;
@@ -441,8 +508,10 @@ cmdTranslate.name = '模组翻译';
 cmdTranslate.help = '翻译最近上传的群文件。\n使用方法：上传文件后，发送 .模组翻译 <目标语言> [覆盖]\n示例：\n.模组翻译 en (译为英文，保留原文)\n.模组翻译 ja 覆盖 (译为日文，直接替换原文)\n.模组翻译 (默认为中文)';
 
 cmdTranslate.solve = async (ctx, msg, cmdArgs) => {
+    if (!requireOfficialQQBinding(ctx, msg, '模组翻译')) return seal.ext.newCmdExecuteResult(true);
     // 1. 获取群号
-    let groupId = ctx.group.groupId;
+    let groupId = compatGroupId(ctx.group.groupId);
+    let userId = compatUserId(ctx.player.userId);
     if (!groupId.includes('Group')) {
         seal.replyToSender(ctx, msg, '❌ 请在群聊中使用此功能。');
         return seal.ext.newCmdExecuteResult(true);
@@ -495,6 +564,10 @@ cmdTranslate.solve = async (ctx, msg, cmdArgs) => {
         let onebotApiUrl = seal.ext.getStringConfig(ext, "OneBot_API_地址");
         if (onebotApiUrl.endsWith('/')) onebotApiUrl = onebotApiUrl.slice(0, -1);
 
+        if (!fileData.direct_url && !/^QQ-Group:\d+$/.test(groupId)) {
+            seal.replyToSender(ctx, msg, '❌ 官Bot群文件没有可用直链。请先使用 .QQ群绑定 <原QQ群号> 绑定后再试。');
+            return seal.ext.newCmdExecuteResult(true);
+        }
         let onebotGroupId = parseInt(groupId.replace('QQ-Group:', ''));
         
         const downloadUrl = await resolveModuleFileDownloadUrl(onebotApiUrl, onebotGroupId, fileData);
@@ -509,6 +582,10 @@ cmdTranslate.solve = async (ctx, msg, cmdArgs) => {
 
         // --- 5. 提交给 Python 后端翻译并上传 ---
         let pythonApiUrl = `http://127.0.0.1:8000/api/translate_and_upload?url=${encodeURIComponent(downloadUrl)}&filename=${encodeURIComponent(filename)}&lang=${encodeURIComponent(targetLang)}&group_id=${onebotGroupId}&upload_url=${encodeURIComponent(uploadBaseUrl)}`;
+        pythonApiUrl += `&user_key=${encodeURIComponent(String(userId || '').replace(/^QQ:/, ''))}`;
+        let realUserName = await resolveRealUserNickname(ctx, userId);
+        pythonApiUrl += `&user_name=${encodeURIComponent(realUserName || String(ctx.player.name || '').trim() || '匿名用户')}`;
+        pythonApiUrl += `&group_key=${encodeURIComponent(String(groupId || '').replace(/^QQ-Group:/, ''))}`;
         if (isPro) pythonApiUrl += `&pro=true`;
         if (isOverwrite) pythonApiUrl += `&overwrite=true`;
         
@@ -561,6 +638,7 @@ ext.cmdMap['translate'] = cmdTranslate;
 // --- 2. 监听文件上传 (只记录，不分析) ---
 function saveUploadedFile(groupId, file) {
     if (!groupId || !file) return;
+    groupId = compatGroupId(groupId);
     let filename = file.name || "";
     if (!filename) return;
 
@@ -575,7 +653,7 @@ function saveUploadedFile(groupId, file) {
         busid: file.busid || 0,
         size: file.size || file.file_size || 0,
         timestamp: new Date().getTime(),
-        direct_url: file.direct_url || ""
+        direct_url: file.direct_url || file.url || ""
     };
 
     if (!fileInfo.file_id && !(fileInfo.direct_url && /^https?:\/\//i.test(fileInfo.direct_url))) return;
@@ -614,8 +692,9 @@ cmdSearchModule.name = '搜索模组';
 cmdSearchModule.help = '在百度网盘库中搜索指定的模组文件/文件夹。\n使用方法：.搜索模组 <关键字> [本地]\n示例：\n.搜索模组 毒汤 (生成网盘分享链接)\n.搜索模组 毒汤 本地 (将模组下载并上传到群文件)';
 
 cmdSearchModule.solve = async (ctx, msg, cmdArgs) => {
+    if (!requireOfficialQQBinding(ctx, msg, '模组搜索')) return seal.ext.newCmdExecuteResult(true);
     // 1. 获取群号 (如果使用本地上传，必须在群里使用)
-    let groupId = ctx.group.groupId;
+    let groupId = compatGroupId(ctx.group.groupId);
     let onebotGroupId = 0;
     
     // 获取所有的参数列表
@@ -652,6 +731,10 @@ cmdSearchModule.solve = async (ctx, msg, cmdArgs) => {
             seal.replyToSender(ctx, msg, '❌ [本地] 模式需要将文件发到群文件，请在群聊中使用。');
             return seal.ext.newCmdExecuteResult(true);
         }
+        if (!/^QQ-Group:\d+$/.test(groupId)) {
+            seal.replyToSender(ctx, msg, '❌ 官Bot群使用本地上传前，请先用 .QQ群绑定 <原QQ群号> 建立群映射。');
+            return seal.ext.newCmdExecuteResult(true);
+        }
         onebotGroupId = parseInt(groupId.replace('QQ-Group:', ''));
     }
 
@@ -662,9 +745,13 @@ cmdSearchModule.solve = async (ctx, msg, cmdArgs) => {
         // 获取上传用的HTTP客户端地址
         let uploadBaseUrl = seal.ext.getStringConfig(ext, "HTTP客户端地址");
         if (uploadBaseUrl.endsWith('/')) uploadBaseUrl = uploadBaseUrl.slice(0, -1);
+        const isOfficialQQ = /^OpenQQ/.test(String(msg.platform || '')) || /^OpenQQ/.test(String(ctx.platform || ''));
+        // 官方 Bot 没有 OneBot /upload_group_file；让核心收到下载 URL 后
+        // 走官方群聊 /files + msg_type=7 的原生富媒体流程。
+        const moduleUploadTarget = isOfficialQQ ? 'official' : uploadBaseUrl;
 
         // 发送请求给Python后端
-        let pythonApiUrl = `http://127.0.0.1:8000/api/search_module?keyword=${encodeURIComponent(keyword)}&local=${isLocal}&group_id=${onebotGroupId}&upload_url=${encodeURIComponent(uploadBaseUrl)}`;
+        let pythonApiUrl = `http://127.0.0.1:8000/api/search_module?keyword=${encodeURIComponent(keyword)}&local=${isLocal}&group_id=${onebotGroupId}&upload_url=${encodeURIComponent(moduleUploadTarget)}`;
         
         let pyResp = await fetch(pythonApiUrl);
         let pyData = await pyResp.json();
@@ -684,7 +771,12 @@ cmdSearchModule.solve = async (ctx, msg, cmdArgs) => {
             let sData = await sResp.json();
 
             if (sData.status === 'done' || sData.status === 'error') {
-                seal.replyToSender(ctx, msg, sData.msg || "处理完毕！");
+                if (sData.status === 'done' && isOfficialQQ && sData.download_url) {
+                    const downloadURL = `http://127.0.0.1:8000${sData.download_url}`;
+                    seal.replyToSender(ctx, msg, `${sData.msg || '✅ 模组压缩完成'}\n[CQ:file,file=${downloadURL}]`);
+                } else {
+                    seal.replyToSender(ctx, msg, sData.msg || "处理完毕！");
+                }
                 return seal.ext.newCmdExecuteResult(true);
             }
             maxRetries--;

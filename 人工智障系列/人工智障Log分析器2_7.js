@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         人工智障Log分析器
 // @author       Air, Gemini
-// @version      2.2.11
-// @description  分析跑团Log日志或进行前文回顾。支持日志链接以及本地群文件上传分析！
+// @version      2.2.13
+// @description  分析跑团Log日志或进行前文回顾。支持日志链接以及本地群文件上传分析，新增指定QQ号分析PL/KP跑团带团风格！
 // @timestamp    1766873593
 // @license      Apache-2.0
 // ==/UserScript==
 
 let ext = seal.ext.find('log-analyzer');
 if (!ext) {
-  ext = seal.ext.new('log-analyzer', 'Air', '2.2.10');
+  ext = seal.ext.new('log-analyzer', 'Air', '2.2.13');
   seal.ext.register(ext);
 }
 
@@ -264,6 +264,36 @@ async function processLogTask(ctx, msg, cmdArgs, modeName, pythonMode) {
     const resolvedUserId = compatUserId(ctx.player && ctx.player.userId);
     const resolvedGroupId = compatGroupId(ctx.group && ctx.group.groupId);
 
+    const isStyleMode = pythonMode === 'player_style';
+    let targetUser = '';
+    if (isStyleMode) {
+        if (cmdArgs.at && cmdArgs.at.length > 0 && cmdArgs.at[0].userId) {
+            targetUser = String(cmdArgs.at[0].userId).replace(/^QQ:/i, '').trim();
+        } else {
+            // 1. 优先提取纯数字 QQ
+            const qqArg = args.find(a => /^\d{5,12}$/.test(String(a).trim()));
+            if (qqArg) {
+                targetUser = String(qqArg).trim();
+            } else {
+                // 2. 扫描非链接、非排除词的参数作为角色/昵称
+                const candidate = args.find(a => {
+                    const s = String(a).trim();
+                    if (!s) return false;
+                    if (/^https?:\/\//i.test(s)) return false;
+                    if (s.startsWith('#')) return false;
+                    const low = s.toLowerCase();
+                    if (['风格', '跑团风格', '带团风格', '玩家风格', 'style', 'pl风格', 'kp风格', 'pro', 'kind', '温柔', '本地', '文件', 'ai', '原版', '专业', '漫画', 'comic', '插画', '黑白', '水彩', '写实', '日式', '页数', '赛博风', '赛博', '历史风', '历史', '古风', '简约风', '简约', '白底', '克苏鲁', '克苏鲁风', '深潜', '废土', '废土风', '末日', '末日风', '二次元', '二次元风', '萌系', '终端', '终端风', '黑客', '经典', '经典风', 'ds', 'deepseek', 'backup', '备用', '备用模型'].includes(low)) return false;
+                    return true;
+                });
+                if (candidate) {
+                    targetUser = String(candidate).trim();
+                } else {
+                    targetUser = String(resolvedUserId || '').replace(/^QQ:/i, '').trim();
+                }
+            }
+        }
+    }
+
     // 1. 获取并解析存储中的自定义配置库
     let stored = ext.storageGet('logai_custom_prompts') || '{}';
     let customPrompts = {};
@@ -369,11 +399,12 @@ async function processLogTask(ctx, msg, cmdArgs, modeName, pythonMode) {
 
     // 将匹配到的自定义名字加入屏蔽字库，以免它被误认为是网址
     // 把主题关键字也加入过滤列表，防止被当成文件名
-    let excludeList =['pro', 'kind', '温柔', '本地', '文件', 'ai', '原版', '专业', '漫画', 'comic', '插画', '黑白', '水彩', '写实', '日式', '页数', '赛博风', '赛博', '历史风', '历史', '古风', '简约风', '简约', '白底', '克苏鲁', '克苏鲁风', '深潜', '废土', '废土风', '末日', '末日风', '二次元', '二次元风', '萌系', '终端', '终端风', '黑客', '经典', '经典风', 'ds', 'deepseek', 'backup', '备用', '备用模型'];
+    let excludeList =['pro', 'kind', '温柔', '本地', '文件', 'ai', '原版', '专业', '漫画', 'comic', '插画', '黑白', '水彩', '写实', '日式', '页数', '风格', '跑团风格', '带团风格', '玩家风格', 'style', 'pl风格', 'kp风格', '赛博风', '赛博', '历史风', '历史', '古风', '简约风', '简约', '白底', '克苏鲁', '克苏鲁风', '深潜', '废土', '废土风', '末日', '末日风', '二次元', '二次元风', '萌系', '终端', '终端风', '黑客', '经典', '经典风', 'ds', 'deepseek', 'backup', '备用', '备用模型'];
     if (comicMode) args.forEach(a => { if (/^\d+页?$/.test(String(a)) || /^页数[：:=]?\d+页?$/.test(String(a))) excludeList.push(a); });
     if (comicPromptMode) excludeList.push('漫画提示词', '漫画测试', 'comicprompt', 'comic_prompt');
     Object.keys(getBackupModelConfig().models || {}).forEach(name => excludeList.push(name));
-    if (customName) excludeList.push(customName); 
+    if (customName) excludeList.push(customName);
+    if (targetUser) excludeList.push(targetUser); 
     
     // 支持多个 Log 链接，保持用户输入顺序；普通配置参数不会被当成链接。
     let linkArgs = args.filter(a => {
@@ -407,7 +438,9 @@ async function processLogTask(ctx, msg, cmdArgs, modeName, pythonMode) {
         user_name: realUserName || String((ctx.player && ctx.player.name) || '').trim() || '匿名用户',
         group_key: String(resolvedGroupId || '').replace(/^QQ-Group:/, ''),
         custom_name: customName,
-        token_module: pythonMode === 'comic' ? 'log_comic' : (comicPromptMode ? 'log_comic_prompt' : (pythonMode === 'recap' ? 'log_recap' : 'log_analyze')),
+        token_module: isStyleMode ? 'player_style' : (pythonMode === 'comic' ? 'log_comic' : (comicPromptMode ? 'log_comic_prompt' : (pythonMode === 'recap' ? 'log_recap' : 'log_analyze'))),
+        target_qq: targetUser,
+        target_user: targetUser,
         character_bible: comicMode ? (seal.ext.getStringConfig(ext, "漫画固定角色外观") || '') : ''
     };
 
@@ -446,7 +479,7 @@ async function processLogTask(ctx, msg, cmdArgs, modeName, pythonMode) {
         apiUrl = `http://127.0.0.1:8000/api/submit_file`;
         payload.url = downloadUrl;
         payload.filename = fileData.name;
-        payload.mode = pythonMode === 'analyze' ? 'log_analyze' : (comicMode ? 'comic' : 'log_recap');
+        payload.mode = isStyleMode ? 'player_style' : (pythonMode === 'analyze' ? 'log_analyze' : (comicMode ? 'comic' : 'log_recap'));
 
     } else {
         const first = logSources[0];
@@ -464,6 +497,7 @@ async function processLogTask(ctx, msg, cmdArgs, modeName, pythonMode) {
         payload.password = first.password;
         logKeyForMsg = logSources.length > 1 ? `${first.key} 等 ${logSources.length} 段` : first.key;
         apiUrl = `http://127.0.0.1:8000/api/submit`;
+        if (isStyleMode) payload.mode = 'player_style';
     }
 
     if (pythonMode === 'comic') {
@@ -493,6 +527,13 @@ async function processLogTask(ctx, msg, cmdArgs, modeName, pythonMode) {
 
     let modeMsg = usePersona ? " [骰娘人设]" : (isAI ? " [纯净AI]" : "");
     if (useLocalFile) modeMsg += "[本地文件]";
+    if (isStyleMode && targetUser) {
+        if (/^\d{5,12}$/.test(targetUser)) {
+            modeMsg += ` [目标QQ:${targetUser}]`;
+        } else {
+            modeMsg += ` [目标角色:${targetUser}]`;
+        }
+    }
     // 【更新提示语逻辑】
     if (fallbackToDSPro) {
         modeMsg += `\n[⚠️ 高级Pro额度耗尽，已自动切换至${backupCfg.label}模型继续服务！]`;
@@ -551,6 +592,20 @@ async function processLogTask(ctx, msg, cmdArgs, modeName, pythonMode) {
             
             if (sData.status === 'done' || sData.status === 'error') {
                 if (sData.status === 'error' && comicReceipt) refundComicGeneration(ctx, msg, comicReceipt);
+                if (sData.status === 'error') {
+                    let errMsg = sData.msg ? `❌ ${sData.msg}\n` : '';
+                    if (sData.image_count !== undefined && sData.image_count > 0) {
+                        let finalUrl = `${resultUrl}&index=0&t=${new Date().getTime()}`;
+                        seal.replyToSender(ctx, msg, `${errMsg}[CQ:image,file=${finalUrl},cache=0]`);
+                    } else if (errMsg) {
+                        seal.replyToSender(ctx, msg, errMsg);
+                    }
+                    if (useLocalFile) {
+                        ext.storageSet(`log_last_file_${resolvedGroupId}`, "");
+                        if (ctx.group && ctx.group.groupId && ctx.group.groupId !== resolvedGroupId) ext.storageSet(`log_last_file_${ctx.group.groupId}`, "");
+                    }
+                    return seal.ext.newCmdExecuteResult(true);
+                }
                 if (sData.image_count !== undefined && sData.image_count > 0) {
                     let msgStr = "";
                     for (let i = 0; i < sData.image_count; i++) {
@@ -588,11 +643,14 @@ async function processLogTask(ctx, msg, cmdArgs, modeName, pythonMode) {
 // --- 注册核心指令： .logai ---
 const cmdLogAi = seal.ext.newCmdItemInfo();
 cmdLogAi.name = 'logai';
-cmdLogAi.help = '对跑团Log进行整体评分。\n用法: .logai [模型显示名] [配置名] <链接/发文件>\n已注册模型可用 .logai 备用模型 列表 查看；旧别名 ds/deepseek 仍兼容。\n配置管理请使用 .logai 配置 示例';
+cmdLogAi.help = '对跑团Log进行整体评分或分析PL/KP风格。\n用法: .logai [模型显示名] [配置名] <链接/发文件>\n风格分析: .logai 风格 [QQ号/@某人] <链接/发文件>\n快捷指令: .风格 [QQ号/@某人] <链接/发文件>\n已注册模型可用 .logai 备用模型 列表 查看；配置管理使用 .logai 配置 示例';
 cmdLogAi.solve = async (ctx, msg, cmdArgs) => { 
     if (!requireOfficialQQBinding(ctx, msg, 'LogAI日志分析')) return seal.ext.newCmdExecuteResult(true);
     // 【拦截 .logai 配置 子指令】
     let val1 = cmdArgs.getArgN(1);
+    if (val1 === '风格' || val1 === '跑团风格' || val1 === '带团风格' || val1 === '玩家风格' || String(val1 || '').toLowerCase() === 'style') {
+        return await processLogTask(ctx, msg, cmdArgs, '跑团/带团风格分析', 'player_style');
+    }
     if (val1 === '漫画提示词' || val1 === '漫画测试' || ['comicprompt', 'comic_prompt'].includes(String(val1 || '').toLowerCase())) return await processLogTask(ctx, msg, cmdArgs, 'LogAI漫画分镜测试', 'comic_prompt');
     if (val1 === '漫画' || String(val1 || '').toLowerCase() === 'comic') {
         return await processLogTask(ctx, msg, cmdArgs, 'LogAI短漫画', 'comic');
@@ -874,3 +932,17 @@ ext.cmdMap['Token排行'] = cmdTokenRank;
 ext.cmdMap['token排行'] = cmdTokenRank;
 ext.cmdMap['Tokens排行'] = cmdTokenRank;
 ext.cmdMap['AI消耗'] = cmdTokenRank;
+
+// --- 注册独立指令： .风格 / .跑团风格 ---
+const cmdStyle = seal.ext.newCmdItemInfo();
+cmdStyle.name = '风格';
+cmdStyle.help = '分析指定玩家或主持人的跑团/带团风格并给出综合评价。\n用法: .风格 [QQ号/@某人/角色昵称] <链接/发文件>\n说明: 支持多链接集合与群文件分析，支持输入QQ号或角色昵称前缀/后缀模糊匹配；不填时默认分析自己。\n示例:\n  .风格 严 https://...\n  .风格 12345678 https://...\n  .风格 墨菲斯 https://...\n  .风格 @某玩家 https://...\n  (先上传Log群文件后) .风格 严';
+cmdStyle.solve = async (ctx, msg, cmdArgs) => {
+    if (!requireOfficialQQBinding(ctx, msg, 'Log风格分析')) return seal.ext.newCmdExecuteResult(true);
+    return await processLogTask(ctx, msg, cmdArgs, '跑团/带团风格分析', 'player_style');
+};
+ext.cmdMap['风格'] = cmdStyle;
+ext.cmdMap['跑团风格'] = cmdStyle;
+ext.cmdMap['带团风格'] = cmdStyle;
+ext.cmdMap['玩家风格'] = cmdStyle;
+
