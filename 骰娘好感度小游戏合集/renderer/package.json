@@ -1,6 +1,6 @@
 {
   "name": "sealdice-affection-renderer",
-  "version": "1.14.1",
+  "version": "1.15.1",
   "private": true,
   "description": "Image renderer for the SealDice affection minigame collection",
   "main": "server.js",

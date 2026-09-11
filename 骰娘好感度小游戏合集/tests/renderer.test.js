@@ -7,13 +7,25 @@ const path = require('node:path');
 let canvasApi;
 try { canvasApi = require('../renderer/node_modules/@napi-rs/canvas'); }
 catch (error) { canvasApi = require('../renderer/node_modules/canvas'); }
-const { loadImage } = canvasApi;
+const { createCanvas, loadImage } = canvasApi;
 const { renderView, normalizeView, server } = require('../renderer/server');
 
 test('德州四种花色使用矢量路径而非服务器字体', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'server.js'), 'utf8');
   assert.match(source, /function drawPlayingCardSuit\(/);
   assert.doesNotMatch(source, /[♠♥♦♣]/);
+});
+
+test('斗地主叫地主阶段隐藏底牌，明牌选择阶段才下发底牌', () => {
+  const bidding = normalizeView({ kind: 'landlord', title: '斗地主', landlordTable: { status: 'bidding', bottom: [{ rank: '3', suit: '♠' }, { rank: 'A', suit: '♥' }] } });
+  assert.deepEqual(bidding.landlordTable.bottom, []);
+  const reveal = normalizeView({ kind: 'landlord', title: '斗地主', landlordTable: { status: 'landlordReveal', bottom: [{ rank: '3', suit: '♠' }, { rank: 'A', suit: '♥' }] } });
+  assert.equal(reveal.landlordTable.bottom.length, 2);
+});
+
+test('四人斗地主图片座位按数组正序逆时针排列', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'server.js'), 'utf8');
+  assert.match(source, /players\.length === 4 \? \[\[95, 205\], \[95, 565\], \[775, 565\], \[775, 205\]\]/);
 });
 
 test('爱牌使用矢量指尖爱心而不依赖服务器Emoji字体', () => {
@@ -24,6 +36,16 @@ test('爱牌使用矢量指尖爱心而不依赖服务器Emoji字体', () => {
   assert.match(iconBlock, /ctx\.translate\(-7, -7\)/);
   assert.match(cardBlock, /card\.type === 'L'/);
   assert.match(cardBlock, /drawLoveFingerHeart\(/);
+});
+
+test('恶魔轮盘场景保留模式结算倍率并可用于图片绘制', async () => {
+  const view = normalizeView({
+    kind: 'demon', title: '恶魔轮盘赌', subtitle: '倍率测试',
+    demonScene: { mode: 'playing', modeKey: '金币', modeMultiplier: 1.4, round: 2, turn: '测试员', shellCount: 3, shellLive: 1, shellBlank: 2, players: [], logs: [] }
+  });
+  assert.equal(view.demonScene.modeMultiplier, 1.4);
+  const png = await renderView({ kind: 'demon', title: '恶魔轮盘赌', subtitle: '倍率测试', demonScene: { mode: 'menu', menuTab: 'modes', modes: [{ name: '欧皇', hp: [6, 6], desc: '主要依靠运气。', multiplier: 0.25 }] } });
+  assert.ok(png.length > 50_000);
 });
 
 test('渲染器生成1200x900非空PNG并保留预览', async () => {
@@ -117,10 +139,12 @@ test('档案彩色模块和详细数据块可渲染并保留预览', async () =>
 test('每日签到与礼物架、赠礼结果使用专用场景渲染', async () => {
   const dailyInput = {
     kind: 'daily', title: '每日签到 · 补给到账', subtitle: '2026-07-26', quote: '“今天也来了呀。” 骰娘递给礼物测试员一份日常补给。',
-    dailyScene: { status: 'claimed', name: '礼物测试员', date: '2026-07-26', coinsReward: 100, affectionReward: 5, coins: 1280, affection: 386, relation: '亲近', relationProgress: 0.215 }
+    dailyScene: { status: 'claimed', name: '礼物测试员', date: '2026-07-26', tier: 'best', tierName: '最好的待遇', coinsReward: 268, affectionReward: 23, coins: 1280, affection: 386, relation: '亲近', relationProgress: 0.215 }
   };
   const normalizedDaily = normalizeView(dailyInput);
   assert.equal(normalizedDaily.dailyScene.status, 'claimed');
+  assert.equal(normalizedDaily.dailyScene.tier, 'best');
+  assert.equal(normalizedDaily.dailyScene.tierName, '最好的待遇');
   assert.equal(normalizedDaily.dailyScene.relationProgress, 0.215);
   const dailyPng = await renderView(dailyInput);
   assert.ok(dailyPng.length > 50_000);
@@ -343,9 +367,10 @@ test('双色球、生死骰与借款专用票面均可渲染', async () => {
   const lotteryPng = await renderView({
     kind: 'scratch', title: 'YAN 双色球', subtitle: '每日18:00静默开奖 · 5红1蓝 · 不计算好感', quote: '一等奖已完成核验。',
     lotteryScene: {
-      mode: 'result', issue: '2026-07-27', price: 10, status: '已核验1注，奖金合计1000游戏币。', totalPrize: 1000,
+      mode: 'result', issue: '2026-07-27', price: 10, status: '已核验14注，奖金合计9000游戏币。', totalPrize: 9000,
+      page: 2, totalPages: 3, pageSize: 6, totalTickets: 14, totalRows: 6,
       selectedRed: [1, 2, 3, 4, 5], selectedBlue: 1, drawnRed: [1, 2, 3, 4, 5], drawnBlue: 1,
-      tickets: [{ id: 'ticket-1', issue: '2026-07-27', red: [1, 2, 3, 4, 5], blue: 1, drawRed: [1, 2, 3, 4, 5], drawBlue: 1, redMatches: 5, blueMatch: true, tier: '一等奖', prize: 1000 }],
+      tickets: Array.from({ length: 6 }, (_, index) => ({ id: `ticket-${index + 1}`, issue: '2026-07-27', red: [1, 2, 3, 4, 5], blue: 1, count: index === 0 ? 9 : 1, drawRed: [1, 2, 3, 4, 5], drawBlue: 1, redMatches: 5, blueMatch: true, tier: index === 0 ? '一等奖' : '未中奖', prize: index === 0 ? 9000 : 0 })),
       prizeTable: [{ label: '5红+蓝', tier: '一等奖', prize: 1000 }]
     }
   });
@@ -408,10 +433,22 @@ test('视频扑克可渲染置顶赔率、单手换牌、五手结算、翻牌�
     ...menuInput, subtitle: 'J或更好 · 翻牌挑战', quote: '点数相同也算失败，可以额外支付游戏币复活。',
     videoPokerScene: {
       ...menuInput.videoPokerScene, mode: 'revive', phase: 'revive', previousCard: { rank: '8', suit: 'S' }, drawnCard: { rank: '8', suit: 'D' },
-      guess: '比大', correct: false, pendingPrize: 82.5, streak: 6, reviveCost: 42, help: ['.视频扑克 复活', '.视频扑克 放弃']
+      guess: '比大', correct: false, pendingPrize: 82.5, streak: 6, reviveCost: 62, reviveRound: 7, reviveRate: 0.75,
+      cashoutLocked: false, help: ['.视频扑克 复活', '.视频扑克 放弃']
     }
   };
+  const normalizedGamble = normalizeView(gambleInput); assert.equal(normalizedGamble.videoPokerScene.reviveRound, 7); assert.equal(normalizedGamble.videoPokerScene.reviveRate, 0.75); assert.equal(normalizedGamble.videoPokerScene.cashoutLocked, false);
   png = await renderView(gambleInput); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'video-poker-high-low-preview.png'), png);
+
+  const lockedPng = await renderView({
+    ...gambleInput, subtitle: 'J或更好 · 复活锁定', quote: '再猜中一轮后才可恢复收下奖金。',
+    videoPokerScene: {
+      ...gambleInput.videoPokerScene, mode: 'gamble', phase: 'gamble', anchorCard: { rank: '8', suit: 'D' },
+      previousCard: null, drawnCard: null, guess: '', correct: null, reviveCost: 0, cashoutLocked: true,
+      help: ['.视频扑克 比大 / 比小', '.视频扑克 放弃']
+    }
+  });
+  assert.ok(lockedPng.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'video-poker-revive-lock-preview.png'), lockedPng);
 
   const statsInput = {
     ...menuInput, subtitle: '专属统计 · 全机台汇总', quote: 'Jackpot与翻牌记录独立保存在刮刮栏目统计中。',
@@ -587,14 +624,14 @@ test('Farkle专用骰桌可渲染帮助、真实骰面、玩家进度与结算�
 
 test('钓鱼详细统计可显示最大鱼、最小鱼与图鉴进度', async () => {
   const png = await renderView({
-    kind: 'stats', title: '钓鱼 · 详细统计', subtitle: '测试员的项目档案', quote: '四十八种鱼获只会在安全收杆后逐项点亮。',
+    kind: 'stats', title: '钓鱼 · 详细统计', subtitle: '测试员的项目档案', quote: '九十六种鱼获只会在安全收杆后逐项点亮。',
     tiles: [
       { label: '总局数', value: '18', tone: 'accent' }, { label: '胜 / 负 / 平', value: '9 / 8 / 1', tone: 'neutral' },
       { label: '胜率', value: '50%', tone: 'positive' }, { label: '历史最高', value: '1288', tone: 'accent' },
       { label: '累计项目分', value: '7250', tone: 'neutral' }, { label: '游戏币净收益', value: '+980', tone: 'positive' },
       { label: '累计获得好感', value: '+35', tone: 'positive' }, { label: '累计失去好感', value: '-0', tone: 'negative' },
       { label: '好感净变化', value: '+35', tone: 'positive' }, { label: '历史最大鱼', value: '皇带鱼 · 6.20kg', tone: 'accent' },
-      { label: '历史最小鱼', value: '麦穗鱼 · 0.18kg', tone: 'positive' }, { label: '图鉴解锁进度', value: '7 / 48 · 15%', tone: 'accent' }
+      { label: '历史最小鱼', value: '麦穗鱼 · 0.18kg', tone: 'positive' }, { label: '图鉴解锁进度', value: '7 / 96 · 7%', tone: 'accent' }
     ],
     lines: ['图鉴已解锁七种鱼获。']
   });
@@ -609,9 +646,9 @@ test('钓鱼水域菜单、垂钓现场与断线状态可渲染', async () => {
     fishingScene: {
       status: 'menu', event: '水面平静，选择今天准备挑战的水域。',
       pondOptions: [
-        { name: '小鱼塘', cost: 10, risk: 8, maxValue: 30, speciesCount: 16, fish: ['麦穗鱼', '鲫鱼', '锦鲤', '老甲鱼'] },
-        { name: '江水', cost: 50, risk: 15, maxValue: 250, speciesCount: 16, fish: ['鳊鱼', '鲈鱼', '鳜鱼', '江豚影子'] },
-        { name: '大海', cost: 100, risk: 22, maxValue: 800, speciesCount: 16, fish: ['鲭鱼', '石斑鱼', '蓝鳍金枪鱼', '皇带鱼'] }
+        { name: '小鱼塘', cost: 10, risk: 8, maxValue: 30, speciesCount: 32, fish: ['麦穗鱼', '鲫鱼', '锦鲤', '老甲鱼'], representatives: [{ name: '麦穗鱼', rarity: 0, asset: 'fish-001' }, { name: '鲫鱼', rarity: 1, asset: 'fish-009' }, { name: '锦鲤', rarity: 2, asset: 'fish-017' }, { name: '老甲鱼', rarity: 3, asset: 'fish-025' }] },
+        { name: '江水', cost: 50, risk: 15, maxValue: 250, speciesCount: 32, fish: ['鳊鱼', '鲈鱼', '鳜鱼', '江豚影子'], representatives: [{ name: '鳊鱼', rarity: 0, asset: 'fish-033' }, { name: '鲈鱼', rarity: 1, asset: 'fish-041' }, { name: '鳜鱼', rarity: 2, asset: 'fish-049' }, { name: '江豚影子', rarity: 3, asset: 'fish-057' }] },
+        { name: '大海', cost: 100, risk: 22, maxValue: 800, speciesCount: 32, fish: ['鲭鱼', '石斑鱼', '蓝鳍金枪鱼', '皇带鱼'], representatives: [{ name: '鲭鱼', rarity: 0, asset: 'fish-065' }, { name: '石斑鱼', rarity: 1, asset: 'fish-073' }, { name: '蓝鳍金枪鱼', rarity: 2, asset: 'fish-081' }, { name: '皇带鱼', rarity: 3, asset: 'fish-089' }] }
       ]
     }
   });
@@ -624,10 +661,10 @@ test('钓鱼水域菜单、垂钓现场与断线状态可渲染', async () => {
       status: 'playing', name: '测试员', pond: '大海', cost: 100, stage: 4, maxStage: 5, risk: 54, value: 1288,
       event: '传说的皇带鱼咬钩，约5.26kg，估值755。',
       haul: [
-        { name: '鲭鱼', rarity: 0, rarityName: '普通', size: 0.72, value: 42 },
-        { name: '石斑鱼', rarity: 1, rarityName: '少见', size: 1.84, value: 126 },
-        { name: '蓝鳍金枪鱼', rarity: 2, rarityName: '稀有', size: 3.45, value: 365 },
-        { name: '皇带鱼', rarity: 3, rarityName: '传说', size: 5.26, value: 755 }
+        { name: '鲭鱼', asset: 'fish-065', rarity: 0, rarityName: '普通', size: 0.72, value: 42 },
+        { name: '石斑鱼', asset: 'fish-073', rarity: 1, rarityName: '少见', size: 1.84, value: 126 },
+        { name: '蓝鳍金枪鱼', asset: 'fish-081', rarity: 2, rarityName: '稀有', size: 3.45, value: 365 },
+        { name: '皇带鱼', asset: 'fish-089', rarity: 3, rarityName: '传说', size: 5.26, value: 755 }
       ]
     }
   });
@@ -639,6 +676,120 @@ test('钓鱼水域菜单、垂钓现场与断线状态可渲染', async () => {
     fishingScene: { status: 'banked', outcome: 'lost', pond: '江水', cost: 50, stage: 3, maxStage: 5, risk: 39, lostCount: 3, lostValue: 286, value: 0, reward: 0, affectionDelta: -2, event: '鱼线突然绷断，鱼篓也被水流卷走。', haul: [] }
   });
   assert.ok(lostPng.length > 50_000);
+});
+
+test('钓鱼图鉴归一化96种资产并渲染4x4锁定页', async () => {
+  const dexInput = {
+    kind: 'fishing', title: '钓鱼佬 · 鱼类图鉴', subtitle: '测试员 · 第6/6页',
+    fishingScene: {
+      status: 'dex', name: '测试员', page: 6, totalPages: 6, unlockedCount: 2, totalSpecies: 96,
+      biggestFish: { name: '格陵兰鲨', asset: 'fish-096', rarity: 3, size: 426.8 },
+      smallestFish: { name: '麦穗鱼', asset: 'fish-001', rarity: 0, size: 0.08 },
+      dexEntries: Array.from({ length: 16 }, (_, index) => ({
+        name: `海鱼${index + 81}`, pond: '大海', asset: `fish-${String(index + 81).padStart(3, '0')}`,
+        rarity: index < 8 ? 2 : 3, rarityName: index < 8 ? '稀有' : '传说', unlocked: index < 2,
+        count: index < 2 ? index + 1 : 0, smallestSize: index < 2 ? 1.2 : 0, largestSize: index < 2 ? 8.6 : 0
+      }))
+    }, quote: '只有安全收入鱼篓的鱼获才会点亮。'
+  };
+  const normalized = normalizeView(dexInput);
+  assert.equal(normalized.fishingScene.status, 'dex'); assert.equal(normalized.fishingScene.dexEntries.length, 16);
+  assert.equal(normalized.fishingScene.dexEntries[0].asset, 'fish-081'); assert.equal(normalized.fishingScene.dexEntries[15].asset, 'fish-096');
+  const png = await renderView(dexInput); assert.ok(png.length > 50_000);
+  fs.writeFileSync(path.join(__dirname, '..', 'docs', 'fishing-dex-preview.png'), png);
+});
+
+test('钓鱼96张透明鱼类精灵均可加载且实际替换矢量兜底', async () => {
+  const spriteDirectory = path.join(__dirname, '..', 'renderer', 'assets', 'fish-sprites');
+  for (let number = 1; number <= 96; number++) {
+    const file = path.join(spriteDirectory, `fish-${String(number).padStart(3, '0')}.png`);
+    assert.equal(fs.existsSync(file), true, `${path.basename(file)} 应存在`);
+    const image = await loadImage(file);
+    assert.ok(image.width >= 100 && image.height >= 80, `${path.basename(file)} 尺寸应足够清晰`);
+    const canvas = createCanvas(image.width, image.height); const context = canvas.getContext('2d'); context.drawImage(image, 0, 0);
+    const corners = [[0, 0], [image.width - 1, 0], [0, image.height - 1], [image.width - 1, image.height - 1]];
+    corners.forEach(([x, y]) => assert.equal(context.getImageData(x, y, 1, 1).data[3], 0, `${path.basename(file)} 四角应透明`));
+  }
+  const base = {
+    kind: 'fishing', title: '钓鱼佬 · 真实鱼影验证',
+    fishingScene: { status: 'playing', pond: '大海', cost: 100, stage: 1, maxStage: 5, risk: 22, value: 45, event: '鲭鱼咬钩。', haul: [{ name: '鲭鱼', rarity: 0, rarityName: '普通', size: 0.72, value: 45 }] }
+  };
+  const fallback = await renderView(base);
+  const bitmap = await renderView({ ...base, fishingScene: { ...base.fishingScene, haul: [{ ...base.fishingScene.haul[0], asset: 'fish-065' }] } });
+  assert.notDeepEqual(bitmap, fallback, '有效资产编号应让最终渲染使用透明鱼类精灵');
+});
+
+test('智力打工菜单、题目与专项统计可渲染', async () => {
+  const active = {
+    kind: 'work', title: '智力打工 · 题目工坊', subtitle: '24点 · 200游戏币/小时',
+    workScene: {
+      mode: 'active', type: 'math24', typeName: '24点', name: '打工测试员', coins: 12, workLimit: 200,
+      attemptsLeft: 1, elapsedMs: 42000,
+      puzzle: { numbers: [1, 5, 5, 5], target: 24, decimal: true, noSolution: false },
+      stats: { questions: 4, solved: 3, bestStreak: 2, bestReward: 8, coinsEarned: 12 }
+    },
+    quote: '题目没有输家，只有下一道题。'
+  };
+  const activePng = await renderView(active);
+  assert.ok(activePng.length > 50_000);
+  const activeImage = await loadImage(activePng);
+  assert.equal(activeImage.width, 1200); assert.equal(activeImage.height, 900);
+  fs.writeFileSync(path.join(__dirname, '..', 'docs', 'work-active-preview.png'), activePng);
+
+  const sudokuInput = {
+    kind: 'work', title: '智力打工 · 题目工坊', subtitle: '数独 · 200游戏币/小时 · 第1题', quote: '九个九宫格各自使用一圈金色边框。',
+    workScene: { mode: 'active', type: 'sudoku', typeName: '数独', name: '打工测试员', coins: 12, workLimit: 200, attemptsLeft: 1, elapsedMs: 17000,
+      puzzle: { width: 9, height: 9, puzzle: '000609000392040058102070369014000000030461287070050001000085906000106470061000830' }, stats: {} }
+  };
+  const normalizedSudoku = normalizeView(sudokuInput); assert.equal(normalizedSudoku.workScene.puzzle.puzzle.length, 81);
+  const sudokuPng = await renderView(sudokuInput); assert.ok(sudokuPng.length > 50_000);
+  fs.writeFileSync(path.join(__dirname, '..', 'docs', 'work-sudoku-preview.png'), sudokuPng);
+
+  const creekInput = {
+    kind: 'work', title: '智力打工 · 题目工坊', subtitle: 'Creek溪流 · 200游戏币/小时 · 第1题', quote: '外围只保留边框，数字节点只出现在内部交点。',
+    workScene: { mode: 'active', type: 'creek', typeName: 'Creek溪流', name: '打工测试员', coins: 12, workLimit: 200, attemptsLeft: 1, elapsedMs: 22000,
+      puzzle: { width: 10, height: 7, unique: true, clues: ['00111111110', '01122223221', '01111222110', '01100110000', '02200000000', '13201101221', '12100101221', '01000000110'] }, stats: {} }
+  };
+  const normalizedCreek = normalizeView(creekInput); assert.equal(normalizedCreek.workScene.puzzle.clues.length, 8); assert.equal(normalizedCreek.workScene.puzzle.unique, true);
+  const creekPng = await renderView(creekInput); assert.ok(creekPng.length > 50_000);
+  fs.writeFileSync(path.join(__dirname, '..', 'docs', 'work-creek-preview.png'), creekPng);
+
+  const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'server.js'), 'utf8');
+  const workBlock = rendererSource.slice(rendererSource.indexOf('function drawWorkScene('), rendererSource.indexOf('async function renderView('));
+  assert.match(workBlock, /for \(let boxRow = 0; boxRow < 3; boxRow\+\+\).*for \(let boxCol = 0; boxCol < 3; boxCol\+\+\)/s);
+  assert.match(workBlock, /for \(let row = 1; row < puzzle\.height; row\+\+\).*for \(let col = 1; col < puzzle\.width; col\+\+\)/s);
+  assert.match(workBlock, /ctx\.strokeRect\(left, top, boardWidth, boardHeight\)/);
+
+  const summaryPng = await renderView({
+    kind: 'work', title: '智力打工 · 当次结算', subtitle: '打工测试员 · 本次工作已经结束',
+    workScene: { mode: 'summary', typeName: '当次结算', name: '打工测试员', coins: 44, workLimit: 200,
+      summary: { issued: 4, completed: 3, solved: 2, failed: 1, skipped: 0, wrongAnswers: 1, gross: 18, paid: 18, averageDifficulty: 4.8, averageSolveSeconds: 52, elapsedMs: 188000 } },
+    quote: '本次工作已结算；发送“.打工 开始”可以开始新一班。'
+  });
+  assert.ok(summaryPng.length > 50_000);
+  fs.writeFileSync(path.join(__dirname, '..', 'docs', 'work-summary-preview.png'), summaryPng);
+
+  const statsPng = await renderView({
+    kind: 'work', title: '智力打工 · 专项统计', subtitle: '打工测试员 · 历史记录',
+    workScene: { mode: 'stats', typeName: '统计', name: '打工测试员', coins: 200, workLimit: 200,
+      stats: { questions: 20, solved: 15, wrong: 5, streak: 3, bestStreak: 8, bestReward: 19, grossReward: 120, coinsEarned: 64, averageSeconds: 83, math24: 7, decimal: 2, noSolution: 1, sudoku: 5, knights: 4, creek: 4 } },
+    quote: '余额达到200后仍可答题，但不再发薪。'
+  });
+  assert.ok(statsPng.length > 50_000);
+  fs.writeFileSync(path.join(__dirname, '..', 'docs', 'work-stats-preview.png'), statsPng);
+
+  const calculatorPng = await renderView({
+    kind: 'work', title: '智力打工 · 计算器游戏', subtitle: '第6关 · 200游戏币/小时 · 第1题', quote: '按钮可以连续输入：.打工 按 221122333。',
+    workScene: { mode: 'active', type: 'calculator', typeName: '计算器游戏', name: '打工测试员', coins: 12, workLimit: 200, attemptsLeft: 1, elapsedMs: 24000,
+      puzzle: { level: 6, target: 32, stepLimit: 4, stepsLeft: 2, value: '310', options: [{ index: 1, label: '末位+2', color: '#db7633' }, { index: 2, label: '×2', color: '#318dd9' }, { index: 3, label: '<<', color: '#db7633' }, { index: 4, label: '数位和', color: '#318dd9' }], history: [{ option: 1, label: '末位+2', before: '155', after: '157' }, { option: 2, label: '×2', before: '157', after: '314' }] }, stats: {} }
+  });
+  assert.ok(calculatorPng.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'work-calculator-preview.png'), calculatorPng);
+});
+
+test('计算器游戏图片场景包含按钮与连续按键提示', async () => {
+  const normalized = normalizeView({ kind: 'work', workScene: { mode: 'active', type: 'calculator', typeName: '计算器游戏', puzzle: { level: 1, target: 8, stepLimit: 3, stepsLeft: 3, value: '0', options: [{ index: 1, label: '+2' }, { index: 2, label: '+3' }] } } });
+  assert.equal(normalized.workScene.type, 'calculator'); assert.equal(normalized.workScene.puzzle.options.length, 2);
+  const png = await renderView(normalized); assert.ok(png.length > 40_000);
 });
 
 test('竞拍之王可渲染助手、菜单、暗标、开箱、图鉴与图片教程', async () => {
@@ -919,4 +1070,129 @@ test('爱赢一切全押直摊图会标记跳过宣告阶段', async () => {
     }, lines: []
   });
   assert.ok(png.length > 50_000);
+});
+
+test('炼金牌桌大手牌双行布局不遮挡本轮已出区域', async () => {
+  const attrs = ['SPIRIT', 'WATER', 'FIRE', 'EARTH', 'AIR', 'CONSERVATION', 'DARKSACRIFICE', 'SNATCH', 'ORACLE', 'TIMEMACHINE', 'FIRE'];
+  const card = (attr, index) => ({ id: index + 1, attr, type: ['DARKSACRIFICE', 'SNATCH', 'ORACLE', 'TIMEMACHINE'].includes(attr) ? 'MAGIC' : 'ELEMENT' });
+  const png = await renderView({
+    kind: 'alchemy', title: '魔幻牌炼金术师', subtitle: '大手牌布局测试',
+    alchemyTable: {
+      status: 'playing', round: 4, maxRounds: 12, current: '手牌测试', deckCount: 35, discardCount: 9,
+      players: [
+        { name: '大手牌玩家', score: 42, handCount: attrs.length, poolCount: 3, isTurn: true, hand: attrs.map(card), played: [card('AIR', 24)], playedGroups: [[card('TIMEMACHINE', 20)], [card('WATER', 21)], [card('FIRE', 22), card('FIRE', 23)], [card('AIR', 24)]], playedGroupCount: 4, lastAction: '第4次出牌：收集1张气牌' },
+        { name: '对手一', score: 20, handCount: 7, poolCount: 2, hand: [], played: [], lastAction: '隐藏手牌' },
+        { name: '对手二', score: 16, handCount: 7, poolCount: 1, hand: [], played: [], lastAction: '隐藏手牌' },
+        { name: '对手三', score: 11, handCount: 7, poolCount: 0, hand: [], played: [], lastAction: '隐藏手牌' }
+      ], poolClearNotice: '大手牌玩家发动黑暗祭祀：全场炼金池已清空（大手牌玩家3张、对手一2张）。', logs: ['物质吸取抽取4张牌。']
+    }, quote: '手牌按属性顺序排列；抽牌较多时自动换行。'
+  });
+  assert.ok(png.length > 50_000);
+  const image = await loadImage(png);
+  assert.equal(image.width, 2400);
+  assert.equal(image.height, 1800);
+  fs.writeFileSync(path.join(__dirname, '..', 'docs', 'alchemy-large-hand-preview.png'), png);
+});
+
+test('炼金牌桌清池事件通过规范化并仅炼金场景使用双倍画布', async () => {
+  const normalized = normalizeView({ kind: 'alchemy', title: '炼金', alchemyTable: { status: 'playing', poolClearNotice: '全场炼金池已清空' } });
+  assert.equal(normalized.alchemyTable.poolClearNotice, '全场炼金池已清空');
+  const regular = await renderView({ kind: 'profile', title: '普通场景', lines: ['保持原尺寸'] });
+  const regularImage = await loadImage(regular);
+  assert.equal(regularImage.width, 1200);
+  assert.equal(regularImage.height, 900);
+});
+
+test('古墓夺宝菜单、五宝轮抽与三重诅咒总榜使用专用图片场景', async () => {
+  const menuInput = {
+    kind: 'tomb', title: '古墓夺宝', subtitle: '四席轮转摸金 · 三重诅咒审判', quote: '真正的目标是活着带走宝物。',
+    tombScene: { mode: 'menu', format: 'normal', formatName: '玩法选择', gameNo: 0, maxGames: 1, round: 0, maxRounds: 8, lastAction: '每轮五件宝物，四人各取一件。', help: ['.古墓 人机 常规 / 耐久', '.古墓 开房 常规 / 耐久', '.古墓 教程 1'] }
+  };
+  let normalized = normalizeView(menuInput); assert.equal(normalized.tombScene.mode, 'menu'); assert.equal(normalized.tombScene.maxRounds, 8);
+  let png = await renderView(menuInput); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'tomb-menu-preview.png'), png);
+
+  const treasures = [
+    ['暮金法老冠', 'crown', '传世', 4, 5, 0, 25], ['夜咒黑钻', 'gem', '传世', 1, 0, 4, 22],
+    ['星砂寻宝仪', 'compass', '机关', 5, 4, 2, 7], ['驱虫圣香', 'jar', '稀有', 1, 2, 0, 8],
+    ['风化旧册', 'book', '残旧', 0, 0, 0, 1]
+  ].map((item, index) => ({ slot: index + 1, name: item[0], icon: item[1], rarity: item[2], weight: item[3], magic: item[4], scarabs: item[5], value: item[6] }));
+  treasures[1].claimedById = 'QQ:2'; treasures[1].claimedByName = '姜修泽'; treasures[1].claimedOrder = 1;
+  treasures[2].effectText = '下一轮高价值宝物更易出现';
+  const players = [
+    ['测试员', false, true, 6, 4, 3, 38, 52, 1], ['姜修泽', true, false, 8, 2, 1, 45, 21, 1],
+    ['葛明治', true, false, 4, 7, 0, 22, 31, 1], ['阿日', true, false, 3, 2, 4, 40, 18, 0]
+  ].map((player) => ({ name: player[0], isBot: player[1], isTurn: player[2], weight: player[3], magic: player[4], scarabs: player[5], value: player[6], extractedValue: player[7], survivals: player[8], status: '5/8件', bag: [] }));
+  const draftInput = {
+    kind: 'tomb', title: '古墓夺宝 · 耐久局', subtitle: '第2/4墓 · 第5/8轮', quote: '不要只看价值。',
+    tombScene: { mode: 'playing', format: 'durable', formatName: '耐久局', gameNo: 2, maxGames: 4, round: 5, maxRounds: 8, currentName: '测试员', secondsRemaining: 47, order: ['测试员', '姜修泽', '葛明治', '阿日'], poolSize: 5, nextPoolSize: 5, treasures, players, lastAction: '第5轮宝物落地，测试员获得首选。', help: ['.古墓 拿 <序号>'] }
+  };
+  normalized = normalizeView(draftInput); assert.equal(normalized.tombScene.treasures.length, 5); assert.equal(normalized.tombScene.players.length, 4); assert.equal(normalized.tombScene.treasures[3].scarabs, 0); assert.equal(normalized.tombScene.treasures[3].magic, 2);
+  assert.equal(normalized.tombScene.treasures[1].claimedByName, '姜修泽'); assert.equal(normalized.tombScene.treasures[2].effectText, '下一轮高价值宝物更易出现');
+  png = await renderView(draftInput); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'tomb-table-preview.png'), png);
+
+  const resultInput = {
+    ...draftInput, title: '古墓夺宝 · 耐久局', subtitle: '最终审判完成', quote: '累计带出价值决定最终名次。',
+    tombScene: {
+      ...draftInput.tombScene, mode: 'finished', currentName: '', treasures: [], lastAction: '测试员以累计带出价值146排名第一。',
+      settlement: { gameNo: 4, allDead: false, survivors: ['QQ:1'], stages: [
+        { name: '超重塌方', detail: '姜修泽以18重量最高，被深渊吞没。', victims: ['QQ:2'] },
+        { name: '法力反噬', detail: '葛明治以9法力冠绝余众，灵魂遭到反噬。', victims: ['QQ:3'] },
+        { name: '万虫噬心', detail: '阿日的法力不足以压制圣甲虫。', victims: ['QQ:4'] }
+      ] },
+      ranking: [
+        { rank: 1, name: '测试员', value: 146, survivals: 3, reward: 300, affectionDelta: 5 },
+        { rank: 2, name: '姜修泽', value: 98, survivals: 2, reward: 100, affectionDelta: 2 },
+        { rank: 3, name: '葛明治', value: 61, survivals: 2, reward: 0, affectionDelta: 0 },
+        { rank: 4, name: '阿日', value: 20, survivals: 1, reward: 0, affectionDelta: -10 }
+      ]
+    }
+  };
+  png = await renderView(resultInput); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'tomb-result-preview.png'), png);
+});
+
+test('恶魔轮盘赌模式百科与实战盘面使用专用图片场景', async () => {
+  const menu = { kind: 'demon', title: '恶魔轮盘赌', subtitle: '道具与符文百科', quote: '选择模式后创建房间。', demonScene: { mode: 'menu', menuTab: 'wiki', modes: [{ name: '经典', hp: [4, 4], desc: '标准规则，一切以此为基础。' }, { name: '薛定谔', hp: [5, 5], desc: '类似道具模式，但会有更多意外情况发生。' }], items: [{ name: '放大镜', desc: '查看当前子弹虚实，持续到开枪' }], runes: [{ name: '不死图腾', desc: '护身符破碎时血量+2' }] } };
+  let normalized = normalizeView(menu); assert.equal(normalized.demonScene.mode, 'menu'); assert.equal(normalized.demonScene.menuTab, 'wiki'); assert.equal(normalized.demonScene.modes.length, 2); assert.equal(normalized.demonScene.runes[0].desc, '护身符破碎时血量+2');
+  let png = await renderView(menu); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'demon-wiki-preview.png'), png);
+  const botLogs = Array.from({ length: 18 }, (_, index) => `骰娘第${index + 1}步：${index % 2 ? '向恶魔测试员开枪' : '使用公开道具'}`);
+  const table = { kind: 'demon', title: '恶魔轮盘赌 · 薛定谔', subtitle: '第3轮 · 当前：恶魔测试员', quote: '所有玩家的道具均为公开信息。', demonScene: { mode: 'playing', roomId: '3141', modeKey: '薛定谔', round: 3, turn: '恶魔测试员', shells: [1, 0, 1, 0], shellCount: 4, shellLive: 2, shellBlank: 2, glassActive: true, glassResult: '实弹', logTitle: '本次人机行动', rules: '类似道具模式，但会有更多意外情况发生。', players: [{ index: 1, name: '恶魔测试员', hp: 4, maxHp: 5, amulets: 1, items: ['放大镜', '锯子'], runes: ['清霜剑', '魔弹', '小丑牌'], current: true, dead: false, damage: 3, kills: 1 }, { index: 2, name: '骰娘', hp: 2, maxHp: 5, amulets: 0, items: ['花生', '香烟', '牛奶', '扑克', '红牛', '转盘', '巧克力'], runes: ['清霜剑', '魔弹', '小丑牌'], current: false, dead: false, damage: 1, kills: 0 }], logs: botLogs } };
+  normalized = normalizeView(table); assert.equal(normalized.demonScene.players.length, 2); assert.deepEqual(normalized.demonScene.players[1].items, ['花生', '香烟', '牛奶', '扑克', '红牛', '转盘', '巧克力']); assert.equal(normalized.demonScene.logs.length, 18); assert.equal(normalized.demonScene.logTitle, '本次人机行动'); assert.deepEqual(normalized.demonScene.shells, [1, 0, 1, 0]); assert.equal(normalized.demonScene.glassActive, true); assert.equal(normalized.demonScene.glassResult, '实弹'); png = await renderView(table); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'demon-table-preview.png'), png);
+});
+
+test('赏金对决图片显示等级、地图事件与可见怪物AI情报', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'server.js'), 'utf8');
+  assert.match(source, /bountyHunt: path\.join\(ASSET_DIR, 'bounty-hunt\.png'\)/);
+  assert.match(source, /bountyResult: path\.join\(ASSET_DIR, 'bounty-result\.png'\)/);
+  assert.match(source, /view\.bountyScene && view\.bountyScene\.mode === 'finished'/);
+  const bossArea = ['F6', 'G6', 'H6', 'F7', 'G7', 'H7', 'F8', 'G8', 'H8'];
+  const scene = { mode: 'playing', mapName: '灰岩矿镇·断脊镇', width: 13, height: 13, round: 8, maxRounds: 40, exits: ['A4'], clues: ['D4', 'G7', 'J10'], bossArea, activeEventCount: 4, aliveMonsterCount: 3, weather: 'fog',
+    cells: Array.from({ length: 169 }, (_, index) => { const x = index % 13; const y = Math.floor(index / 13); const pos = `${String.fromCharCode(65 + x)}${y + 1}`; return { x, y, terrain: index === 70 ? 'F' : 'P', known: index === 70, marker: index === 70 ? 'self' : '', enemyCount: index === 98 ? 1 : 0, event: index === 81 ? 'relic' : '', eventMarker: index === 81 ? '特' : '', monster: index === 82 ? 'hound' : '', bossArea: bossArea.includes(pos), exit: index === 39, clue: index === 42 || index === 84 || index === 126, landmark: '' }; }),
+    players: [{ name: '测试猎人', teamId: 1, level: 3, skillPoints: 7, fieldTraitCount: 2, fieldTraits: ['幽暗视界', '影步'], status: '存活', pos: 'F7', hp: 112, maxHp: 150, stamina: 2, weapon: '和平使者左轮', ammo: 4, reserve: 14, kills: 1, clues: 1 }, { name: 'Bot', teamId: 2, level: 1, skillPoints: 5, fieldTraitCount: 0, status: '存活', isBot: true }],
+    events: [{ type: 'relic', name: '猎人遗物', pos: 'G7', state: 'active' }], monsters: [{ type: 'hound', name: '血猎犬', pos: 'H7', hp: 55, maxHp: 105, status: '追踪' }], publicEvents: ['其他猎人向远处开火'], ownLogs: ['受到怪物伤害（撕咬）：血猎犬造成48伤害，并附加流血。', '持续伤害（流血）：血猎犬造成10伤害。'], ownActions: [], help: ['.赏金 行动 移动C4|侦查'] };
+  const normalized = normalizeView({ kind: 'bounty', title: '赏金对决', bountyScene: scene }); assert.equal(normalized.bountyScene.players[0].level, 3); assert.equal(normalized.bountyScene.cells[81].eventMarker, '特'); assert.equal(normalized.bountyScene.cells[98].enemyCount, 1); assert.equal(normalized.bountyScene.monsters[0].type, 'hound'); assert.deepEqual(normalized.bountyScene.clues, ['D4', 'G7', 'J10']); assert.deepEqual(normalized.bountyScene.bossArea, bossArea); assert.equal(normalized.bountyScene.cells.filter((cell) => cell.clue).length, 3); assert.equal(normalized.bountyScene.cells.filter((cell) => cell.bossArea).length, 9); assert.deepEqual(normalized.bountyScene.ownLogs, scene.ownLogs);
+  const bountyBlock = source.slice(source.indexOf('function drawBountyScene('), source.indexOf('function drawWorkScene(')); assert.match(bountyBlock, /scene\.ownLogs/); assert.match(bountyBlock, /我的战报/); assert.doesNotMatch(bountyBlock, /scene\.publicEvents/);
+  const png = await renderView({ kind: 'bounty', title: '赏金对决', subtitle: '事件与怪物阶段', quote: '私人战术图：幽暗视界已生效。', bountyScene: scene }); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'bounty-events-preview.png'), png);
+  const image = await loadImage(png); const canvas = createCanvas(image.width, image.height); const context = canvas.getContext('2d'); context.drawImage(image, 0, 0); const markerPixel = context.getImageData(306, 419, 1, 1).data;
+  assert.ok(markerPixel[0] < 130 && markerPixel[1] > 190 && markerPixel[2] > 170, 'Boss范围标题不能覆盖自身的青绿色位置标记');
+  const resultPng = await renderView({ kind: 'bounty', title: '赏金对决', subtitle: '撤离结算', quote: '雾散了，带着赏金活着离开。', bountyScene: { ...scene, mode: 'finished', round: 18, players: scene.players.map((player, index) => ({ ...player, status: index === 0 ? '赏金撤离' : '未能撤离', bounty: index === 0 })) } });
+  assert.ok(resultPng.length > 50_000);
+  assert.notEqual(require('node:crypto').createHash('sha256').update(resultPng).digest('hex'), require('node:crypto').createHash('sha256').update(png).digest('hex'));
+  fs.writeFileSync(path.join(__dirname, '..', 'docs', 'bounty-result-preview.png'), resultPng);
+  const soloScene = { ...scene, mode: 'playing', players: [{ ...scene.players[0], pos: 'C4', hp: 150, maxHp: 150, stamina: 3, weapon: '和平使者左轮', ammo: 6, reserve: 18, items: ['急救包', '猎刀'] }] };
+  const soloNormalized = normalizeView({ kind: 'bounty', title: '赏金对决', bountyScene: soloScene });
+  assert.equal(soloNormalized.bountyScene.players.length, 1);
+  assert.equal(soloNormalized.bountyScene.players[0].pos, 'C4');
+  const soloPng = await renderView({ kind: 'bounty', title: '赏金对决 · 单排PvE', subtitle: '私人战术图', quote: 'Bot位置隐藏；你的猎人已装备基础武器和道具。', bountyScene: soloScene });
+  assert.ok(soloPng.length > 50_000);
+  fs.writeFileSync(path.join(__dirname, '..', 'docs', 'bounty-solo-preview.png'), soloPng);
+});
+
+test('赏金仓库居中展示且武器道具库使用分页表格', async () => {
+  const warehouse = { kind: 'bounty', title: '赏金对决 · 猎人仓库', subtitle: '第1/1页 · 共2名猎人 · 当前余额500游戏币', quote: '', bountyScene: { mode: 'menu', menuMode: 'warehouse', menuTitle: '猎人仓库', menuNotice: '发送“.赏金 选择猎人 序号”切换当前猎人。', menuPage: 1, menuTotal: 1, menuEntries: [{ title: '1. 荒野新手', tag: '当前猎人', detail: 'HP 150/150 · 技能点5 · 和平使者左轮', extra: '道具：急救包、猎刀 · 特质：无', selected: true }, { title: '2. 夜行者', tag: 'Lv2', detail: 'HP 100/150 · 技能点6 · 莫辛91', extra: '道具：治疗针剂 · 特质：轻步' }] } };
+  let png = await renderView(warehouse); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'bounty-warehouse-preview.png'), png);
+  const weaponRows = Array.from({ length: 10 }, (_, index) => [String(index + 1), `测试武器${index + 1}`, index < 4 ? '短' : '长', String(60 + index * 5), '6/18', '67/79', '2', '1', String(35 + index * 10), '单动；逐发+2']);
+  const weapon = { kind: 'bounty', title: '赏金对决 · 武器库', subtitle: '第1/4页', quote: '命中率栏为腰射/瞄准。', tutorial: { layout: 'table', page: 1, total: 4, columns: [['序', 42], ['武器', 160], ['弹', 46], ['伤害', 58], ['弹仓/备弹', 82], ['腰/瞄', 76], ['距', 44], ['格', 42], ['价格', 60], ['射击与装填', 190]], rows: weaponRows } };
+  const normalized = normalizeView(weapon); assert.equal(normalized.tutorial.layout, 'table'); assert.equal(normalized.tutorial.rows.length, 10); png = await renderView(weapon); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'bounty-weapon-table-preview.png'), png);
+  const item = { kind: 'bounty', title: '赏金对决 · 道具库', subtitle: '第1/2页', quote: '每名猎人最多携带4件道具。', tutorial: { layout: 'table', page: 1, total: 2, columns: [['序', 48], ['道具', 190], ['类别', 90], ['伤害/轻重击', 130], ['价格', 74], ['效果', 445]], rows: Array.from({ length: 8 }, (_, index) => [String(index + 1), `测试道具${index + 1}`, index < 3 ? '治疗' : '爆炸', index < 3 ? '—' : '180/90/30', String(20 + index * 10), '用于测试中央表格中的较长效果说明']) } };
+  png = await renderView(item); assert.ok(png.length > 50_000); fs.writeFileSync(path.join(__dirname, '..', 'docs', 'bounty-item-table-preview.png'), png);
 });

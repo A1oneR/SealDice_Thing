@@ -14,12 +14,17 @@ const HOST = process.env.AFFECTION_RENDER_HOST || '127.0.0.1';
 const RENDER_TTL_MS = Math.max(60_000, Math.min(3_600_000, Number.parseInt(process.env.AFFECTION_IMAGE_TTL_MS || '600000', 10)));
 const MAX_RENDERED_IMAGES = Math.max(10, Math.min(1000, Number.parseInt(process.env.AFFECTION_IMAGE_CACHE_MAX || '200', 10)));
 const ASSET_DIR = path.join(__dirname, 'assets');
+const DEFAULT_FISH_SPRITE_DIR = path.join(ASSET_DIR, 'fish-sprites');
+const ALCHEMY_ASSET_DIR = path.join(ASSET_DIR, 'alchemy');
 const BACKGROUNDS = {
   casino: path.join(ASSET_DIR, 'casino-table.png'),
   dice: path.join(ASSET_DIR, 'dice-table.png'),
   fishing: path.join(ASSET_DIR, 'fishing-water.png'),
   auction: path.join(ASSET_DIR, 'auction-yard.png'),
-  auctionOpen: path.join(ASSET_DIR, 'auction-open.png')
+  auctionOpen: path.join(ASSET_DIR, 'auction-open.png'),
+  bountyHunt: path.join(ASSET_DIR, 'bounty-hunt.png'),
+  bountyResult: path.join(ASSET_DIR, 'bounty-result.png'),
+    alchemy: path.join(ASSET_DIR, 'alchemy', 'alchemy-background.png')
 };
 const imageCache = new Map();
 const renderedImages = new Map();
@@ -43,17 +48,26 @@ function storeRenderedImage(buffer) {
 }
 
 function backgroundFor(kind) {
-  if (['poker', 'blackjack', 'dmd', 'love', 'videoPoker'].includes(kind)) return BACKGROUNDS.casino;
+  if (['poker', 'blackjack', 'dmd', 'love', 'videoPoker', 'demon', 'fourKnife'].includes(kind)) return BACKGROUNDS.casino;
   if (kind === 'fishing') return BACKGROUNDS.fishing;
+  if (kind === 'fishingCard' || kind === '钓鱼牌') return BACKGROUNDS.fishing;
   if (kind === 'auction') return BACKGROUNDS.auction;
+  if (kind === 'tomb') return BACKGROUNDS.auctionOpen;
+  if (kind === 'bounty') return BACKGROUNDS.bountyHunt;
+  if (kind === 'alchemy') return BACKGROUNDS.alchemy;
   return BACKGROUNDS.dice;
 }
 
 function accentFor(kind) {
-  if (['poker', 'blackjack', 'dmd', 'videoPoker'].includes(kind)) return '#f3c969';
+  if (['poker', 'blackjack', 'dmd', 'videoPoker', 'fourKnife'].includes(kind)) return '#f3c969';
+  if (kind === 'demon') return '#d84f63';
   if (kind === 'love') return '#7edc9d';
   if (kind === 'fishing') return '#82d5d0';
+  if (kind === 'fishingCard' || kind === '钓鱼牌') return '#d3424b';
   if (kind === 'auction') return '#f0c84b';
+  if (kind === 'tomb') return '#d7a84f';
+  if (kind === 'bounty') return '#c89549';
+  if (kind === 'alchemy') return '#b895f5';
   return '#ef8d7f';
 }
 
@@ -61,6 +75,46 @@ async function cachedImage(file) {
   // node-canvas on Windows can fail to fopen paths containing non-ASCII characters.
   if (!imageCache.has(file)) imageCache.set(file, loadImage(fs.readFileSync(file)));
   return imageCache.get(file);
+}
+
+async function cachedFishSprite(file) {
+  if (!imageCache.has(file)) imageCache.set(file, loadImage(fs.readFileSync(file)));
+  return imageCache.get(file);
+}
+
+function fishAssetInfo(asset) {
+  const match = /^fish-(\d{3})$/.exec(String(asset || ''));
+  if (!match) return null;
+  const number = Number(match[1]);
+  if (number < 1 || number > 96) return null;
+  return { number, asset: `fish-${String(number).padStart(3, '0')}` };
+}
+
+function fishSpritePath(asset) {
+  const info = fishAssetInfo(asset);
+  if (!info) return '';
+  const directory = process.env.AFFECTION_FISH_SPRITE_DIR || DEFAULT_FISH_SPRITE_DIR;
+  return path.join(directory, `${info.asset}.png`);
+}
+
+async function loadFishingSprites(scene) {
+  const assetNames = new Set();
+  const collect = (fish) => {
+    const info = fishAssetInfo(fish && fish.asset);
+    if (info) assetNames.add(info.asset);
+  };
+  (scene.haul || []).forEach(collect);
+  (scene.dexEntries || []).forEach(collect);
+  (scene.pondOptions || []).forEach((option) => (option.representatives || []).forEach(collect));
+  collect(scene.biggestFish); collect(scene.smallestFish);
+  const sprites = new Map();
+  await Promise.all(Array.from(assetNames).map(async (asset) => {
+    const file = fishSpritePath(asset);
+    if (!fs.existsSync(file)) return;
+    try { sprites.set(asset, await cachedFishSprite(file)); }
+    catch (error) { /* Missing or invalid optional portraits use the vector fallback. */ }
+  }));
+  return sprites;
 }
 
 function sanitizeText(value, max = 240) {
@@ -98,12 +152,72 @@ function normalizeDmdCard(card) {
   };
 }
 
+function normalizeAlchemyCard(card) {
+  if (!card || typeof card !== 'object') return null;
+  const attr = ['SPIRIT', 'WATER', 'FIRE', 'EARTH', 'AIR', 'CONSERVATION', 'DARKSACRIFICE', 'SNATCH', 'ORACLE', 'TIMEMACHINE'].includes(card.attr) ? card.attr : 'SPIRIT';
+  return { attr, type: card.type === 'MAGIC' ? 'MAGIC' : 'ELEMENT', hidden: Boolean(card.hidden) };
+}
+
+function normalizeAlchemyTable(table) {
+  const raw = table && typeof table === 'object' ? table : {};
+  return {
+    status: ['menu', 'waiting', 'playing', 'finished'].includes(raw.status) ? raw.status : 'menu',
+    round: Math.max(0, Math.floor(safeNumber(raw.round))), maxRounds: Math.max(1, Math.floor(safeNumber(raw.maxRounds, 12))),
+    current: sanitizeText(raw.current, 20), deckCount: Math.max(0, Math.floor(safeNumber(raw.deckCount))), discardCount: Math.max(0, Math.floor(safeNumber(raw.discardCount))),
+    lastAction: sanitizeText(raw.lastAction, 160),
+    poolClearNotice: sanitizeText(raw.poolClearNotice, 180),
+    players: (Array.isArray(raw.players) ? raw.players : []).slice(0, 4).map((player) => ({
+      name: sanitizeText(player && player.name, 18) || '玩家', isBot: Boolean(player && player.isBot), score: safeNumber(player && player.score),
+      handCount: Math.max(0, Math.floor(safeNumber(player && player.handCount))), poolCount: Math.max(0, Math.floor(safeNumber(player && player.poolCount))),
+      isTurn: Boolean(player && player.isTurn), lastAction: sanitizeText(player && player.lastAction, 80),
+      hand: (Array.isArray(player && player.hand) ? player.hand : []).slice(0, 16).map(normalizeAlchemyCard).filter(Boolean),
+      played: (Array.isArray(player && player.played) ? player.played : []).slice(0, 12).map(normalizeAlchemyCard).filter(Boolean),
+      playedGroups: (Array.isArray(player && player.playedGroups) ? player.playedGroups : []).slice(0, 64).map((group) => (Array.isArray(group) ? group : []).slice(0, 16).map(normalizeAlchemyCard).filter(Boolean)),
+      playedGroupCount: Math.max(0, Math.floor(safeNumber(player && player.playedGroupCount, Array.isArray(player && player.playedGroups) ? player.playedGroups.length : 0))),
+      collected: player && player.collected && typeof player.collected === 'object' ? Object.keys(player.collected).slice(0, 6).map((key) => ({ key: sanitizeText(key, 16), value: Math.max(0, Math.floor(safeNumber(player.collected[key]))) })) : []
+    })),
+    logs: (Array.isArray(raw.logs) ? raw.logs : []).slice(-12).map((line) => sanitizeText(line, 140)),
+    ranking: (Array.isArray(raw.ranking) ? raw.ranking : []).slice(0, 4).map((row, index) => ({
+      rank: Math.max(1, Math.floor(safeNumber(row && row.rank, index + 1))), name: sanitizeText(row && row.name, 18) || '玩家',
+      score: safeNumber(row && row.score), coinReward: safeNumber(row && row.coinReward), affectionDelta: safeNumber(row && row.affectionDelta)
+    })),
+    settlement: raw.settlement && typeof raw.settlement === 'object' ? {
+      title: sanitizeText(raw.settlement.title, 40), subtitle: sanitizeText(raw.settlement.subtitle, 100),
+      logs: (Array.isArray(raw.settlement.logs) ? raw.settlement.logs : []).slice(0, 8).map((line) => sanitizeText(line, 140))
+    } : null
+  };
+}
+
 function normalizeFarkleTurn(turn) {
   if (!turn || typeof turn !== 'object') return null;
   return {
     name: sanitizeText(turn.name, 18) || '玩家', isBot: Boolean(turn.isBot), farkled: Boolean(turn.farkled),
     dice: (Array.isArray(turn.dice) ? turn.dice : []).slice(0, 6).map((die) => Math.max(1, Math.min(6, Math.floor(safeNumber(die, 1))))),
     lostScore: Math.max(0, safeNumber(turn.lostScore)), gained: Math.max(0, safeNumber(turn.gained)), total: Math.max(0, safeNumber(turn.total))
+  };
+}
+
+function normalizeWorkScene(scene) {
+  const raw = scene && typeof scene === 'object' ? scene : {};
+  const rawPuzzle = raw.puzzle && typeof raw.puzzle === 'object' ? raw.puzzle : null;
+  const rawPuzzleText = rawPuzzle ? sanitizeText(rawPuzzle.puzzle, 100) : '';
+  const rawBlankCount = rawPuzzle ? Math.max(0, Math.floor(safeNumber(rawPuzzle.blankCount))) : 0;
+  return {
+    mode: ['menu', 'active', 'solved', 'revealed', 'summary', 'stats'].includes(raw.mode) ? raw.mode : 'menu',
+    type: sanitizeText(raw.type, 16), typeName: sanitizeText(raw.typeName, 20), name: sanitizeText(raw.name, 18) || '玩家',
+    coins: Math.max(0, Math.floor(safeNumber(raw.coins))), workLimit: Math.max(0, Math.floor(safeNumber(raw.workLimit, 200))),
+    attemptsLeft: Math.max(0, Math.floor(safeNumber(raw.attemptsLeft))), wrongCount: Math.max(0, Math.floor(safeNumber(raw.wrongCount))), elapsedMs: Math.max(0, safeNumber(raw.elapsedMs)), questionNo: Math.max(0, Math.floor(safeNumber(raw.questionNo))), formal: Boolean(raw.formal), difficultyScore: safeNumber(raw.difficultyScore), difficultyLabel: sanitizeText(raw.difficultyLabel, 16), difficultyMethod: sanitizeText(raw.difficultyMethod, 40), difficultyTier: sanitizeText(raw.difficultyTier, 40), lastResult: raw.lastResult && typeof raw.lastResult === 'object' ? { durationMs: Math.max(0, safeNumber(raw.lastResult.durationMs)), reward: Math.max(0, safeNumber(raw.lastResult.reward)), gross: Math.max(0, safeNumber(raw.lastResult.gross)), difficulty: sanitizeText(raw.lastResult.difficulty, 16), difficultyScore: safeNumber(raw.lastResult.difficultyScore), formal: Boolean(raw.lastResult.formal) } : null,
+    puzzle: rawPuzzle ? {
+      numbers: (Array.isArray(rawPuzzle.numbers) ? rawPuzzle.numbers : []).slice(0, 4).map((value) => safeNumber(value)), target: Math.max(1, Math.floor(safeNumber(rawPuzzle.target, 24))),
+      decimal: Boolean(rawPuzzle.decimal), noSolution: Boolean(rawPuzzle.noSolution), unique: Boolean(rawPuzzle.unique), blankCount: rawBlankCount || (rawPuzzleText ? (rawPuzzleText.match(/0/g) || []).length : 0), puzzle: rawPuzzleText, answer: raw.mode === 'revealed' ? sanitizeText(rawPuzzle.answer, 100) : '', difficultyMethod: sanitizeText(rawPuzzle.difficultyMethod, 40), difficultyTier: sanitizeText(rawPuzzle.difficultyTier, 40), width: Math.max(1, Math.floor(safeNumber(rawPuzzle.width))), height: Math.max(1, Math.floor(safeNumber(rawPuzzle.height))),
+      count: Math.max(0, Math.floor(safeNumber(rawPuzzle.count))), statements: (Array.isArray(rawPuzzle.statements) ? rawPuzzle.statements : []).slice(0, 8).map((statement) => sanitizeText(statement && statement.text, 80)), clues: (Array.isArray(rawPuzzle.clues) ? rawPuzzle.clues : []).slice(0, 13).map((line) => sanitizeText(line, 20)),
+      level: Math.max(0, Math.floor(safeNumber(rawPuzzle.level))), stepLimit: Math.max(0, Math.floor(safeNumber(rawPuzzle.stepLimit))), stepsLeft: Math.max(0, Math.floor(safeNumber(rawPuzzle.stepsLeft))), value: sanitizeText(rawPuzzle.value, 32), options: (Array.isArray(rawPuzzle.options) ? rawPuzzle.options : []).slice(0, 8).map((option, index) => ({ index: Math.max(1, Math.floor(safeNumber(option && option.index, index + 1))), label: sanitizeText(option && option.label, 24), needsArg: Boolean(option && option.needsArg), color: /^#[0-9a-f]{6}$/i.test(String(option && option.color || '')) ? String(option.color) : '#db7633' })), history: (Array.isArray(rawPuzzle.history) ? rawPuzzle.history : []).slice(-12).map((item) => ({ option: Math.max(1, Math.floor(safeNumber(item && item.option))), label: sanitizeText(item && item.label, 24), before: sanitizeText(item && item.before, 32), after: sanitizeText(item && item.after, 32) }))
+    } : null,
+    batch: raw.batch && typeof raw.batch === 'object' ? { issued: Math.max(0, Math.floor(safeNumber(raw.batch.issued))), completed: Math.max(0, Math.floor(safeNumber(raw.batch.completed))), solved: Math.max(0, Math.floor(safeNumber(raw.batch.solved))), failed: Math.max(0, Math.floor(safeNumber(raw.batch.failed))), skipped: Math.max(0, Math.floor(safeNumber(raw.batch.skipped))), wrongAnswers: Math.max(0, Math.floor(safeNumber(raw.batch.wrongAnswers))), gross: Math.max(0, Math.floor(safeNumber(raw.batch.gross))), paid: Math.max(0, Math.floor(safeNumber(raw.batch.paid))), averageDifficulty: safeNumber(raw.batch.averageDifficulty), averageSolveSeconds: Math.max(0, Math.floor(safeNumber(raw.batch.averageSolveSeconds))), elapsedMs: Math.max(0, safeNumber(raw.batch.elapsedMs)) } : null,
+    summary: raw.summary && typeof raw.summary === 'object' ? { issued: Math.max(0, Math.floor(safeNumber(raw.summary.issued))), completed: Math.max(0, Math.floor(safeNumber(raw.summary.completed))), solved: Math.max(0, Math.floor(safeNumber(raw.summary.solved))), failed: Math.max(0, Math.floor(safeNumber(raw.summary.failed))), skipped: Math.max(0, Math.floor(safeNumber(raw.summary.skipped))), wrongAnswers: Math.max(0, Math.floor(safeNumber(raw.summary.wrongAnswers))), gross: Math.max(0, Math.floor(safeNumber(raw.summary.gross))), paid: Math.max(0, Math.floor(safeNumber(raw.summary.paid))), averageDifficulty: safeNumber(raw.summary.averageDifficulty), averageSolveSeconds: Math.max(0, Math.floor(safeNumber(raw.summary.averageSolveSeconds))), elapsedMs: Math.max(0, safeNumber(raw.summary.elapsedMs)) } : null,
+    stats: raw.stats && typeof raw.stats === 'object' ? {
+      questions: Math.max(0, Math.floor(safeNumber(raw.stats.questions))), solved: Math.max(0, Math.floor(safeNumber(raw.stats.solved))), wrong: Math.max(0, Math.floor(safeNumber(raw.stats.wrong))), streak: Math.max(0, Math.floor(safeNumber(raw.stats.streak))), bestStreak: Math.max(0, Math.floor(safeNumber(raw.stats.bestStreak))), bestReward: Math.max(0, Math.floor(safeNumber(raw.stats.bestReward))), grossReward: Math.max(0, Math.floor(safeNumber(raw.stats.grossReward))), coinsEarned: Math.max(0, Math.floor(safeNumber(raw.stats.coinsEarned))), averageSeconds: Math.max(0, Math.floor(safeNumber(raw.stats.averageSeconds))), math24: Math.max(0, Math.floor(safeNumber(raw.stats.math24))), decimal: Math.max(0, Math.floor(safeNumber(raw.stats.decimal))), noSolution: Math.max(0, Math.floor(safeNumber(raw.stats.noSolution))), sudoku: Math.max(0, Math.floor(safeNumber(raw.stats.sudoku))), knights: Math.max(0, Math.floor(safeNumber(raw.stats.knights))), creek: Math.max(0, Math.floor(safeNumber(raw.stats.creek))), calculator: Math.max(0, Math.floor(safeNumber(raw.stats.calculator))), calculatorSolved: Math.max(0, Math.floor(safeNumber(raw.stats.calculatorSolved)))
+    } : null
   };
 }
 
@@ -135,10 +249,67 @@ function normalizeLovePlayer(player) {
   };
 }
 
+// ---- 钓鱼牌（福建钓鱼牌）视图 ----
+function normalizeFishingCard(card) {
+  if (!card || typeof card !== 'object') return null;
+  const color = card.color === 'black' || card.color === '黑' || card.color === 'B' ? 'black' : 'red';
+  return {
+    id: sanitizeText(card.id, 12), name: sanitizeText(card.name || card.rank || card.label || card.text, 4),
+    color, point: Math.max(1, Math.min(8, Math.floor(safeNumber(card.point, card.value || 1)))),
+    hidden: Boolean(card.hidden), owner: sanitizeText(card.owner, 18), eaten: Boolean(card.eaten),
+    status: sanitizeText(card.status, 12)
+  };
+}
+
+function normalizeFishingCardTable(table) {
+  const raw = table && typeof table === 'object' ? table : {};
+  const cardList = (value, max) => (Array.isArray(value) ? value : []).slice(0, max).map(normalizeFishingCard).filter(Boolean);
+  return {
+    status: ['menu', 'waiting', 'dealing', 'playing', 'round_result', 'finished'].includes(raw.status) ? raw.status : 'menu',
+    mode: sanitizeText(raw.mode || raw.matchMode, 16) || 'single',
+    matchMode: sanitizeText(raw.matchMode || raw.kind, 16),
+    round: Math.max(0, Math.floor(safeNumber(raw.round, 1))),
+    maxRounds: Math.max(1, Math.floor(safeNumber(raw.maxRounds, 1))),
+    current: Math.max(0, Math.floor(safeNumber(raw.current, raw.currentIndex))),
+    currentName: sanitizeText(raw.currentName, 18),
+    phase: sanitizeText(raw.phase || raw.phaseLabel, 32),
+    deckCount: Math.max(0, Math.floor(safeNumber(raw.deckCount, raw.drawPileCount == null ? raw.drawCount : raw.drawPileCount))),
+    drawPileCount: Math.max(0, Math.floor(safeNumber(raw.drawPileCount, raw.deckCount == null ? raw.drawCount : raw.deckCount))),
+    publicCards: cardList(raw.publicCards || raw.publicPool || raw.pool || raw.board || raw.common, 30),
+    board: cardList(raw.board || raw.publicCards || raw.publicPool || raw.pool || raw.common, 30),
+    scent: normalizeFishingCard(raw.scent || raw.topCard),
+    deal: raw.deal && typeof raw.deal === 'object' ? {
+      phase: sanitizeText(raw.deal.phase, 24), distributor: Math.max(-1, Math.floor(safeNumber(raw.deal.distributor, -1))),
+      dealerDraws: cardList(raw.deal.dealerDraws, 8), selected: (Array.isArray(raw.deal.selected) ? raw.deal.selected : []).slice(0, 10).map((x) => Math.floor(safeNumber(x))),
+      order: (Array.isArray(raw.deal.order) ? raw.deal.order : []).slice(0, 10).map((x) => Math.floor(safeNumber(x))),
+      revealed: cardList(raw.deal.revealed, 8), head: Math.max(-1, Math.floor(safeNumber(raw.deal.head, -1))), direction: sanitizeText(raw.deal.direction, 12),
+      piles: (Array.isArray(raw.deal.piles) ? raw.deal.piles : []).slice(0, 11).map((pile, i) => ({ index: Math.max(1, Math.floor(safeNumber(pile && pile.index, i + 1))), count: Math.max(0, Math.floor(safeNumber(pile && pile.count, Array.isArray(pile && pile.cards) ? pile.cards.length : 0))), cards: cardList(pile && pile.cards, 6) })),
+      logs: (Array.isArray(raw.deal.logs) ? raw.deal.logs : []).slice(-8).map((line) => sanitizeText(line, 140))
+    } : null,
+    result: raw.result && typeof raw.result === 'object' ? {
+      winnerName: sanitizeText(raw.result.winnerName, 18), reason: sanitizeText(raw.result.reason, 120),
+      score: safeNumber(raw.result.score), reward: safeNumber(raw.result.reward), affectionDelta: safeNumber(raw.result.affectionDelta)
+    } : null,
+    players: (Array.isArray(raw.players) ? raw.players : []).slice(0, 4).map((player, index) => ({
+      name: sanitizeText(player && player.name, 18) || `玩家${index + 1}`,
+      isBot: Boolean(player && player.isBot), isGuest: Boolean(player && player.isGuest), isTurn: Boolean(player && player.isTurn),
+      score: safeNumber(player && player.score), roundScore: safeNumber(player && (player.roundScore == null ? player.turnScore : player.roundScore)),
+      handCount: Math.max(0, Math.floor(safeNumber(player && player.handCount, Array.isArray(player && player.hand) ? player.hand.length : 0))),
+      eatenCount: Math.max(0, Math.floor(safeNumber(player && (player.eatenCount == null ? player.cardsEaten : player.eatenCount)))),
+      hand: cardList(player && (player.hand || player.cards), 16), eaten: cardList(player && (player.eaten || player.collected || player.scoring), 30),
+      lastAction: sanitizeText(player && player.lastAction, 80), rank: Math.max(0, Math.floor(safeNumber(player && player.rank))),
+      reward: safeNumber(player && (player.reward == null ? player.coinReward : player.reward)), affectionDelta: safeNumber(player && player.affectionDelta)
+    })),
+    logs: (Array.isArray(raw.logs) ? raw.logs : []).slice(-8).map((line) => sanitizeText(line, 140)),
+    help: (Array.isArray(raw.help) ? raw.help : []).slice(0, 5).map((line) => sanitizeText(line, 100)),
+    quote: sanitizeText(raw.quote, 180)
+  };
+}
+
 function normalizeLotteryTicket(ticket) {
   if (!ticket || typeof ticket !== 'object') return null;
   return {
-    id: sanitizeText(ticket.id, 28), issue: sanitizeText(ticket.issue, 16), cost: Math.max(0, Math.floor(safeNumber(ticket.cost))),
+    id: sanitizeText(ticket.id, 28), issue: sanitizeText(ticket.issue, 16), cost: Math.max(0, Math.floor(safeNumber(ticket.cost))), count: Math.max(1, Math.min(20, Math.floor(safeNumber(ticket.count, 1)))),
     red: (Array.isArray(ticket.red) ? ticket.red : []).slice(0, 5).map((value) => Math.max(1, Math.min(15, Math.floor(safeNumber(value, 1))))),
     blue: Math.max(0, Math.min(4, Math.floor(safeNumber(ticket.blue)))),
     drawRed: (Array.isArray(ticket.drawRed) ? ticket.drawRed : []).slice(0, 5).map((value) => Math.max(1, Math.min(15, Math.floor(safeNumber(value, 1))))),
@@ -174,14 +345,27 @@ function normalizeView(input) {
   const rawDmd = input && input.dmdTable && typeof input.dmdTable === 'object' ? input.dmdTable : null;
   const rawFarkle = input && input.farkleTable && typeof input.farkleTable === 'object' ? input.farkleTable : null;
   const rawLove = input && input.loveTable && typeof input.loveTable === 'object' ? input.loveTable : null;
+  // 钓鱼牌模块使用独立的牌桌视图；同时兼容 fishingCardScene 命名，便于旧版插件迁移。
+  const rawFishingCard = input && input.fishingCardTable && typeof input.fishingCardTable === 'object' ? input.fishingCardTable
+    : (input && input.fishingCardScene && typeof input.fishingCardScene === 'object' ? input.fishingCardScene : null);
   const rawFishing = input && input.fishingScene && typeof input.fishingScene === 'object' ? input.fishingScene : null;
   const rawDaily = input && input.dailyScene && typeof input.dailyScene === 'object' ? input.dailyScene : null;
   const rawGift = input && input.giftScene && typeof input.giftScene === 'object' ? input.giftScene : null;
   const rawAuction = input && input.auctionScene && typeof input.auctionScene === 'object' ? input.auctionScene : null;
+  const rawTomb = input && input.tombScene && typeof input.tombScene === 'object' ? input.tombScene : null;
+  const rawBounty = input && input.bountyScene && typeof input.bountyScene === 'object' ? input.bountyScene : null;
+  const rawDemon = input && input.demonScene && typeof input.demonScene === 'object' ? input.demonScene : null;
+  const rawLandlord = input && input.landlordTable && typeof input.landlordTable === 'object' ? input.landlordTable : null;
+  const rawWork = input && input.workScene && typeof input.workScene === 'object' ? input.workScene : null;
+  const rawAlchemy = input && input.alchemyTable && typeof input.alchemyTable === 'object' ? input.alchemyTable : null;
+  const rawFourKnife = input && input.fourKnifeTable && typeof input.fourKnifeTable === 'object' ? input.fourKnifeTable : null;
   return {
     kind: sanitizeText(input && input.kind, 32) || 'profile',
     title: sanitizeText(input && input.title, 80) || '骰娘好感度',
     subtitle: sanitizeText(input && input.subtitle, 160),
+    profilePage: Math.max(1, Math.floor(safeNumber(input && input.profilePage, 1))),
+    profileTotalPages: Math.max(1, Math.floor(safeNumber(input && input.profileTotalPages, 1))),
+    profilePageSize: Math.max(1, Math.floor(safeNumber(input && input.profilePageSize, 6))),
     quote: sanitizeText(input && input.quote, 300),
     lines: rawLines.slice(0, 24).map((line) => {
       if (line && typeof line === 'object') return `${sanitizeText(line.label, 80)}：${sanitizeText(line.value, 180)}`;
@@ -205,7 +389,8 @@ function normalizeView(input) {
         tone: normalizeTone(detail && detail.tone)
       }))
     })),
-    modules: rawModules.slice(0, 8).map((module) => ({
+    // 资料卡由插件按页提供模块；这里保留足够空间，避免最后一页被旧的8项上限截断。
+    modules: rawModules.slice(0, 24).map((module) => ({
       key: sanitizeText(module && module.key, 20), name: sanitizeText(module && module.name, 30),
       plays: safeNumber(module && module.plays), wins: safeNumber(module && module.wins),
       losses: safeNumber(module && module.losses), draws: safeNumber(module && module.draws),
@@ -252,10 +437,12 @@ function normalizeView(input) {
       lastAction: sanitizeText(rawBlackjack.lastAction, 180)
     } : null,
     tutorial: rawTutorial ? {
-      page: Math.max(1, Math.floor(safeNumber(rawTutorial.page, 1))), total: Math.max(1, Math.floor(safeNumber(rawTutorial.total, 1))),
+      layout: rawTutorial.layout === 'table' ? 'table' : 'cards', page: Math.max(1, Math.floor(safeNumber(rawTutorial.page, 1))), total: Math.max(1, Math.floor(safeNumber(rawTutorial.total, 1))),
       entries: (Array.isArray(rawTutorial.entries) ? rawTutorial.entries : []).slice(0, 10).map((entry) => ({
         title: sanitizeText(entry && entry.title, 30), description: sanitizeText(entry && entry.description, 180), tag: sanitizeText(entry && entry.tag, 24)
-      }))
+      })),
+      columns: (Array.isArray(rawTutorial.columns) ? rawTutorial.columns : []).slice(0, 12).map((column) => ({ title: sanitizeText(Array.isArray(column) ? column[0] : column && column.title, 24), width: Math.max(30, Math.min(500, safeNumber(Array.isArray(column) ? column[1] : column && column.width, 80))) })),
+      rows: (Array.isArray(rawTutorial.rows) ? rawTutorial.rows : []).slice(0, 12).map((row) => (Array.isArray(row) ? row : []).slice(0, 12).map((cell) => sanitizeText(cell, 100)))
     } : null,
     scratchTicket: rawScratch ? {
       denom: Math.max(1, Math.floor(safeNumber(rawScratch.denom, 10))), type: sanitizeText(rawScratch.type, 24),
@@ -276,9 +463,14 @@ function normalizeView(input) {
       drawnBlue: Math.max(0, Math.min(4, Math.floor(safeNumber(rawLottery.drawnBlue)))),
       redMatches: Math.max(0, Math.min(5, Math.floor(safeNumber(rawLottery.redMatches)))), blueMatch: Boolean(rawLottery.blueMatch),
       tier: sanitizeText(rawLottery.tier, 16), prize: Math.max(0, Math.floor(safeNumber(rawLottery.prize))), totalPrize: Math.max(0, Math.floor(safeNumber(rawLottery.totalPrize))),
-      tickets: (Array.isArray(rawLottery.tickets) ? rawLottery.tickets : []).slice(0, 8).map(normalizeLotteryTicket).filter(Boolean),
-      history: (Array.isArray(rawLottery.history) ? rawLottery.history : []).slice(0, 8).map(normalizeLotteryTicket).filter(Boolean),
-      draws: (Array.isArray(rawLottery.draws) ? rawLottery.draws : []).slice(0, 8).map(normalizeLotteryDraw).filter(Boolean),
+      totalTickets: Math.max(0, Math.floor(safeNumber(rawLottery.totalTickets))),
+      totalRows: Math.max(0, Math.floor(safeNumber(rawLottery.totalRows))),
+      page: Math.max(1, Math.floor(safeNumber(rawLottery.page, 1))),
+      totalPages: Math.max(1, Math.floor(safeNumber(rawLottery.totalPages, 1))),
+      pageSize: Math.max(1, Math.min(6, Math.floor(safeNumber(rawLottery.pageSize, 6)))),
+      tickets: (Array.isArray(rawLottery.tickets) ? rawLottery.tickets : []).slice(0, 6).map(normalizeLotteryTicket).filter(Boolean),
+      history: (Array.isArray(rawLottery.history) ? rawLottery.history : []).slice(0, 6).map(normalizeLotteryTicket).filter(Boolean),
+      draws: (Array.isArray(rawLottery.draws) ? rawLottery.draws : []).slice(0, 6).map(normalizeLotteryDraw).filter(Boolean),
       prizeTable: (Array.isArray(rawLottery.prizeTable) ? rawLottery.prizeTable : []).slice(0, 10).map((row) => ({
         label: sanitizeText(row && row.label, 20), tier: sanitizeText(row && row.tier, 16), prize: Math.max(0, Math.floor(safeNumber(row && row.prize)))
       }))
@@ -325,6 +517,8 @@ function normalizeView(input) {
       anchorCard: normalizePlayingCard(rawVideoPoker.anchorCard), previousCard: normalizePlayingCard(rawVideoPoker.previousCard), drawnCard: normalizePlayingCard(rawVideoPoker.drawnCard),
       guess: sanitizeText(rawVideoPoker.guess, 12), correct: rawVideoPoker.correct == null ? null : Boolean(rawVideoPoker.correct),
       streak: Math.max(0, Math.min(13, Math.floor(safeNumber(rawVideoPoker.streak)))), reviveCost: Math.max(0, safeNumber(rawVideoPoker.reviveCost)),
+      reviveRound: Math.max(0, Math.min(13, Math.floor(safeNumber(rawVideoPoker.reviveRound)))),
+      reviveRate: Math.max(0, Math.min(1, safeNumber(rawVideoPoker.reviveRate))), cashoutLocked: Boolean(rawVideoPoker.cashoutLocked),
       balance: Math.max(0, Math.floor(safeNumber(rawVideoPoker.balance))),
       help: (Array.isArray(rawVideoPoker.help) ? rawVideoPoker.help : []).slice(0, 5).map((line) => sanitizeText(line, 90)),
       stats: rawVideoPoker.stats && typeof rawVideoPoker.stats === 'object' ? {
@@ -362,10 +556,28 @@ function normalizeView(input) {
       })),
       help: (Array.isArray(rawDmd.help) ? rawDmd.help : []).slice(0, 6).map((line) => sanitizeText(line, 90))
     } : null,
+    landlordTable: rawLandlord ? {
+      status: ['menu', 'waiting', 'bidding', 'landlordReveal', 'reportChoice', 'reportPlayChoice', 'playing', 'finished'].includes(rawLandlord.status) ? rawLandlord.status : 'waiting',
+      mode: sanitizeText(rawLandlord.mode, 16), round: Math.max(1, Math.floor(safeNumber(rawLandlord.round, 1))), maxRounds: Math.max(1, Math.floor(safeNumber(rawLandlord.maxRounds, 1))),
+      multiplier: Math.max(1, Math.floor(safeNumber(rawLandlord.multiplier, 1))), current: Math.max(0, Math.floor(safeNumber(rawLandlord.current))),
+      openLandlord: Boolean(rawLandlord.openLandlord),
+      displayPlayerName: sanitizeText(rawLandlord.displayPlayerName, 18), displayPassed: Boolean(rawLandlord.displayPassed),
+      revealPlayerName: sanitizeText(rawLandlord.revealPlayerName, 18), revealPlayerIndex: Math.max(-1, Math.floor(safeNumber(rawLandlord.revealPlayerIndex, -1))),
+      revealCard: rawLandlord.revealCard && typeof rawLandlord.revealCard === 'object' ? { rank: sanitizeText(rawLandlord.revealCard.rank, 3), suit: sanitizeText(rawLandlord.revealCard.suit, 2) } : null,
+      // 叫地主前隐藏底牌；只有地主确定并进入明牌选择/出牌阶段后才下发牌面。
+      bottom: rawLandlord.status !== 'bidding' && rawLandlord.status !== 'waiting'
+        ? (Array.isArray(rawLandlord.bottom) ? rawLandlord.bottom : []).slice(0, 8).map((card) => ({ rank: sanitizeText(card && card.rank, 3), suit: sanitizeText(card && card.suit, 2) }))
+        : [],
+      currentPlay: (Array.isArray(rawLandlord.currentPlay) ? rawLandlord.currentPlay : []).slice(0, 20).map((card) => ({ rank: sanitizeText(card && card.rank, 3), suit: sanitizeText(card && card.suit, 2) })),
+      players: (Array.isArray(rawLandlord.players) ? rawLandlord.players : []).slice(0, 4).map((player) => ({
+        name: sanitizeText(player && player.name, 18) || '玩家', role: sanitizeText(player && player.role, 10), handCount: Math.max(0, Math.floor(safeNumber(player && player.handCount))),
+        isBot: Boolean(player && player.isBot), botLevel: Math.max(0, Math.min(4, Math.floor(safeNumber(player && player.botLevel)))), isTurn: Boolean(player && player.isTurn), lastAction: sanitizeText(player && player.lastAction, 30), hand: (Array.isArray(player && player.hand) ? player.hand : []).slice(0, 54).map((card) => ({ rank: sanitizeText(card && card.rank, 3), suit: sanitizeText(card && card.suit, 2) }))
+      })), logs: (Array.isArray(rawLandlord.logs) ? rawLandlord.logs : []).slice(-8).map((line) => sanitizeText(line, 160))
+    } : null,
     farkleTable: rawFarkle ? {
       status: ['menu', 'waiting', 'playing', 'finished'].includes(rawFarkle.status) ? rawFarkle.status : 'playing',
       phase: ['turn', 'rolled', 'kept'].includes(rawFarkle.phase) ? rawFarkle.phase : 'turn',
-      phaseLabel: sanitizeText(rawFarkle.phaseLabel, 32), target: Math.max(1, safeNumber(rawFarkle.target, 5000)),
+      phaseLabel: sanitizeText(rawFarkle.phaseLabel, 32), target: Math.max(1, safeNumber(rawFarkle.target, 5000)), ruleSet: safeNumber(rawFarkle.ruleSet, 1) === 2 ? 2 : 1,
       currentName: sanitizeText(rawFarkle.currentName, 18), remaining: Math.max(0, Math.min(6, Math.floor(safeNumber(rawFarkle.remaining, 6)))),
       dice: (Array.isArray(rawFarkle.dice) ? rawFarkle.dice : []).slice(0, 6).map((die) => Math.max(1, Math.min(6, Math.floor(safeNumber(die, 1))))),
       diceReview: Boolean(rawFarkle.diceReview), reviewTurn: normalizeFarkleTurn(rawFarkle.reviewTurn), lastBotTurn: normalizeFarkleTurn(rawFarkle.lastBotTurn),
@@ -405,8 +617,9 @@ function normalizeView(input) {
       })),
       help: (Array.isArray(rawLove.help) ? rawLove.help : []).slice(0, 5).map((line) => sanitizeText(line, 100))
     } : null,
+    fishingCardTable: rawFishingCard ? normalizeFishingCardTable(rawFishingCard) : null,
     fishingScene: rawFishing ? {
-      status: ['menu', 'playing', 'banked', 'lost'].includes(rawFishing.status) ? rawFishing.status : 'playing',
+      status: ['menu', 'playing', 'banked', 'lost', 'dex'].includes(rawFishing.status) ? rawFishing.status : 'playing',
       outcome: sanitizeText(rawFishing.outcome, 16), name: sanitizeText(rawFishing.name, 18), pond: sanitizeText(rawFishing.pond, 18),
       cost: Math.max(0, safeNumber(rawFishing.cost)), stage: Math.max(0, Math.floor(safeNumber(rawFishing.stage))),
       maxStage: Math.max(1, Math.floor(safeNumber(rawFishing.maxStage, 5))), risk: Math.max(0, Math.min(100, safeNumber(rawFishing.risk))),
@@ -414,19 +627,40 @@ function normalizeView(input) {
       affectionDelta: safeNumber(rawFishing.affectionDelta), event: sanitizeText(rawFishing.event, 180),
       lostValue: Math.max(0, safeNumber(rawFishing.lostValue)), lostCount: Math.max(0, Math.floor(safeNumber(rawFishing.lostCount))),
       haul: (Array.isArray(rawFishing.haul) ? rawFishing.haul : []).slice(0, 5).map((fish) => ({
-        name: sanitizeText(fish && fish.name, 24), rarity: Math.max(0, Math.min(3, Math.floor(safeNumber(fish && fish.rarity)))),
+        name: sanitizeText(fish && fish.name, 24), asset: fishAssetInfo(fish && fish.asset) ? String(fish.asset) : '', rarity: Math.max(0, Math.min(3, Math.floor(safeNumber(fish && fish.rarity)))),
         rarityName: sanitizeText(fish && fish.rarityName, 12), size: Math.max(0, safeNumber(fish && fish.size)), value: Math.max(0, safeNumber(fish && fish.value))
       })),
       pondOptions: (Array.isArray(rawFishing.pondOptions) ? rawFishing.pondOptions : []).slice(0, 3).map((option) => ({
         name: sanitizeText(option && option.name, 18), cost: Math.max(0, safeNumber(option && option.cost)),
         risk: Math.max(0, Math.min(100, safeNumber(option && option.risk))), maxValue: Math.max(0, safeNumber(option && option.maxValue)),
         speciesCount: Math.max(0, Math.floor(safeNumber(option && option.speciesCount))),
-        fish: (Array.isArray(option && option.fish) ? option.fish : []).slice(0, 4).map((name) => sanitizeText(name, 20))
+        fish: (Array.isArray(option && option.fish) ? option.fish : []).slice(0, 4).map((name) => sanitizeText(name, 20)),
+        representatives: (Array.isArray(option && option.representatives) ? option.representatives : []).slice(0, 4).map((fish) => ({
+          name: sanitizeText(fish && fish.name, 24), asset: fishAssetInfo(fish && fish.asset) ? String(fish.asset) : '',
+          rarity: Math.max(0, Math.min(3, Math.floor(safeNumber(fish && fish.rarity))))
+        }))
+      })),
+      page: Math.max(1, Math.floor(safeNumber(rawFishing.page, 1))), totalPages: Math.max(1, Math.floor(safeNumber(rawFishing.totalPages, 1))),
+      unlockedCount: Math.max(0, Math.floor(safeNumber(rawFishing.unlockedCount))), totalSpecies: Math.max(0, Math.floor(safeNumber(rawFishing.totalSpecies))),
+      biggestFish: rawFishing.biggestFish && typeof rawFishing.biggestFish === 'object' ? {
+        name: sanitizeText(rawFishing.biggestFish.name, 24), asset: fishAssetInfo(rawFishing.biggestFish.asset) ? String(rawFishing.biggestFish.asset) : '',
+        rarity: Math.max(0, Math.min(3, Math.floor(safeNumber(rawFishing.biggestFish.rarity)))), size: Math.max(0, safeNumber(rawFishing.biggestFish.size))
+      } : null,
+      smallestFish: rawFishing.smallestFish && typeof rawFishing.smallestFish === 'object' ? {
+        name: sanitizeText(rawFishing.smallestFish.name, 24), asset: fishAssetInfo(rawFishing.smallestFish.asset) ? String(rawFishing.smallestFish.asset) : '',
+        rarity: Math.max(0, Math.min(3, Math.floor(safeNumber(rawFishing.smallestFish.rarity)))), size: Math.max(0, safeNumber(rawFishing.smallestFish.size))
+      } : null,
+      dexEntries: (Array.isArray(rawFishing.dexEntries) ? rawFishing.dexEntries : []).slice(0, 16).map((fish) => ({
+        name: sanitizeText(fish && fish.name, 24), pond: sanitizeText(fish && fish.pond, 18),
+        asset: fishAssetInfo(fish && fish.asset) ? String(fish.asset) : '', rarity: Math.max(0, Math.min(3, Math.floor(safeNumber(fish && fish.rarity)))),
+        rarityName: sanitizeText(fish && fish.rarityName, 12), unlocked: Boolean(fish && fish.unlocked),
+        count: Math.max(0, Math.floor(safeNumber(fish && fish.count))), largestSize: Math.max(0, safeNumber(fish && fish.largestSize)),
+        smallestSize: Math.max(0, safeNumber(fish && fish.smallestSize))
       }))
     } : null,
     dailyScene: rawDaily ? {
       status: rawDaily.status === 'already' ? 'already' : 'claimed', name: sanitizeText(rawDaily.name, 18) || '玩家',
-      date: sanitizeText(rawDaily.date, 16), coinsReward: Math.max(0, safeNumber(rawDaily.coinsReward)),
+      date: sanitizeText(rawDaily.date, 16), tier: ['basic', 'better', 'best'].includes(rawDaily.tier) ? rawDaily.tier : 'basic', tierName: sanitizeText(rawDaily.tierName, 16) || '日常待遇', coinsReward: Math.max(0, safeNumber(rawDaily.coinsReward)),
       affectionReward: safeNumber(rawDaily.affectionReward), coins: Math.max(0, safeNumber(rawDaily.coins)),
       affection: safeNumber(rawDaily.affection), relation: sanitizeText(rawDaily.relation, 16),
       relationProgress: Math.max(0, Math.min(1, safeNumber(rawDaily.relationProgress)))
@@ -454,7 +688,7 @@ function normalizeView(input) {
         kind: ['reveal', 'valuation', 'statistics', 'hybrid'].includes(rawAuction.assistant.kind) ? rawAuction.assistant.kind : 'reveal',
         typeLabel: sanitizeText(rawAuction.assistant.typeLabel, 18), triggerLabel: sanitizeText(rawAuction.assistant.triggerLabel, 28),
         color: /^#[0-9a-f]{6}$/i.test(String(rawAuction.assistant.color || '')) ? String(rawAuction.assistant.color) : '#f0c84b'
-      } : null,
+    } : null,
       assistants: (Array.isArray(rawAuction.assistants) ? rawAuction.assistants : []).slice(0, 12).map((assistant) => ({
         name: sanitizeText(assistant && assistant.name, 18), skill: sanitizeText(assistant && assistant.skill, 24),
         description: sanitizeText(assistant && assistant.description, 120),
@@ -538,7 +772,119 @@ function normalizeView(input) {
         name: sanitizeText(row && row.name, 20), plays: Math.max(0, Math.floor(safeNumber(row && row.plays))),
         wins: Math.max(0, Math.floor(safeNumber(row && row.wins))), profit: safeNumber(row && row.profit), items: Math.max(0, Math.floor(safeNumber(row && row.items)))
       }))
-    } : null
+    } : null,
+    tombScene: rawTomb ? {
+      mode: ['menu', 'waiting', 'playing', 'between_games', 'finished'].includes(rawTomb.mode) ? rawTomb.mode : 'menu',
+      format: rawTomb.format === 'durable' ? 'durable' : 'normal', formatName: sanitizeText(rawTomb.formatName, 16),
+      gameNo: Math.max(0, Math.floor(safeNumber(rawTomb.gameNo))), maxGames: Math.max(1, Math.min(4, Math.floor(safeNumber(rawTomb.maxGames, 1)))),
+      round: Math.max(0, Math.floor(safeNumber(rawTomb.round))), maxRounds: Math.max(1, Math.min(12, Math.floor(safeNumber(rawTomb.maxRounds, 8)))),
+      currentName: sanitizeText(rawTomb.currentName, 20), secondsRemaining: Math.max(0, Math.min(60, Math.floor(safeNumber(rawTomb.secondsRemaining)))),
+      order: (Array.isArray(rawTomb.order) ? rawTomb.order : []).slice(0, 4).map((name) => sanitizeText(name, 18)),
+      poolSize: Math.max(0, Math.min(5, Math.floor(safeNumber(rawTomb.poolSize, 5)))), nextPoolSize: Math.max(4, Math.min(5, Math.floor(safeNumber(rawTomb.nextPoolSize, 5)))),
+      treasures: (Array.isArray(rawTomb.treasures) ? rawTomb.treasures : []).slice(0, 5).map((item) => ({
+        slot: Math.max(1, Math.min(5, Math.floor(safeNumber(item && item.slot, 1)))), name: sanitizeText(item && item.name, 24),
+        icon: sanitizeText(item && item.icon, 16), rarity: sanitizeText(item && item.rarity, 12),
+        weight: safeNumber(item && item.weight), magic: safeNumber(item && item.magic), scarabs: safeNumber(item && item.scarabs), value: safeNumber(item && item.value),
+        effectText: sanitizeText(item && item.effectText, 42), claimedById: sanitizeText(item && item.claimedById, 60),
+        claimedByName: sanitizeText(item && item.claimedByName, 24), claimedOrder: Math.max(0, Math.min(4, Math.floor(safeNumber(item && item.claimedOrder))))
+      })),
+      swallowed: rawTomb.swallowed && typeof rawTomb.swallowed === 'object' ? { name: sanitizeText(rawTomb.swallowed.name, 24), icon: sanitizeText(rawTomb.swallowed.icon, 16) } : null,
+      players: (Array.isArray(rawTomb.players) ? rawTomb.players : []).slice(0, 4).map((player) => ({
+        name: sanitizeText(player && player.name, 24), isBot: Boolean(player && player.isBot), isGuest: Boolean(player && player.isGuest), isTurn: Boolean(player && player.isTurn),
+        weight: safeNumber(player && player.weight), magic: safeNumber(player && player.magic), scarabs: safeNumber(player && player.scarabs), value: safeNumber(player && player.value),
+        setBonus: safeNumber(player && player.setBonus), extractedValue: safeNumber(player && player.extractedValue), survivals: safeNumber(player && player.survivals), status: sanitizeText(player && player.status, 30),
+        bag: (Array.isArray(player && player.bag) ? player.bag : []).slice(0, 8).map((item) => ({ name: sanitizeText(item && item.name, 20), icon: sanitizeText(item && item.icon, 16), rarity: sanitizeText(item && item.rarity, 12) }))
+      })),
+      lastAction: sanitizeText(rawTomb.lastAction, 180),
+      settlement: rawTomb.settlement && typeof rawTomb.settlement === 'object' ? {
+        gameNo: Math.max(0, Math.floor(safeNumber(rawTomb.settlement.gameNo))), allDead: Boolean(rawTomb.settlement.allDead),
+        survivors: (Array.isArray(rawTomb.settlement.survivors) ? rawTomb.settlement.survivors : []).slice(0, 4).map((id) => sanitizeText(id, 60)),
+        stages: (Array.isArray(rawTomb.settlement.stages) ? rawTomb.settlement.stages : []).slice(0, 3).map((stage) => ({ name: sanitizeText(stage && stage.name, 18), detail: sanitizeText(stage && stage.detail, 120), victims: (Array.isArray(stage && stage.victims) ? stage.victims : []).slice(0, 4).map((id) => sanitizeText(id, 60)) }))
+      } : null,
+      ranking: (Array.isArray(rawTomb.ranking) ? rawTomb.ranking : []).slice(0, 4).map((row, index) => ({
+        rank: Math.max(1, Math.floor(safeNumber(row && row.rank, index + 1))), name: sanitizeText(row && row.name, 24), value: safeNumber(row && row.value),
+        survivals: safeNumber(row && row.survivals), reward: safeNumber(row && row.reward), affectionDelta: safeNumber(row && row.affectionDelta)
+      })),
+      help: (Array.isArray(rawTomb.help) ? rawTomb.help : []).slice(0, 5).map((line) => sanitizeText(line, 100))
+    } : null,
+    bountyScene: rawBounty ? {
+      mode: ['menu', 'waiting', 'playing', 'finished'].includes(rawBounty.mode) ? rawBounty.mode : 'menu',
+      menuMode: ['home', 'warehouse', 'info'].includes(rawBounty.menuMode) ? rawBounty.menuMode : 'home', menuTitle: sanitizeText(rawBounty.menuTitle, 36), menuNotice: sanitizeText(rawBounty.menuNotice, 260), menuPage: Math.max(1, Math.floor(safeNumber(rawBounty.menuPage, 1))), menuTotal: Math.max(1, Math.floor(safeNumber(rawBounty.menuTotal, 1))),
+      menuEntries: (Array.isArray(rawBounty.menuEntries) ? rawBounty.menuEntries : []).slice(0, 20).map((entry) => ({ title: sanitizeText(entry && entry.title, 36), tag: sanitizeText(entry && entry.tag, 28), detail: sanitizeText(entry && entry.detail, 130), extra: sanitizeText(entry && entry.extra, 160), selected: Boolean(entry && entry.selected), disabled: Boolean(entry && entry.disabled) })),
+      mapName: sanitizeText(rawBounty.mapName, 36), width: Math.max(1, Math.min(13, Math.floor(safeNumber(rawBounty.width, 13)))), height: Math.max(1, Math.min(13, Math.floor(safeNumber(rawBounty.height, 13)))),
+      round: Math.max(0, Math.floor(safeNumber(rawBounty.round))), maxRounds: Math.max(1, Math.floor(safeNumber(rawBounty.maxRounds, 40))), exits: (Array.isArray(rawBounty.exits) ? rawBounty.exits : []).slice(0, 6).map((v) => sanitizeText(v, 4)), clues: (Array.isArray(rawBounty.clues) ? rawBounty.clues : []).slice(0, 3).map((v) => sanitizeText(v, 4)), bossArea: (Array.isArray(rawBounty.bossArea) ? rawBounty.bossArea : []).slice(0, 9).map((v) => sanitizeText(v, 4)),
+      cells: (Array.isArray(rawBounty.cells) ? rawBounty.cells : []).slice(0, 169).map((cell) => { const enemyCount = Math.max(0, Math.min(6, Math.floor(safeNumber(cell && cell.enemyCount)))); return { x: Math.max(0, Math.min(12, Math.floor(safeNumber(cell && cell.x)))), y: Math.max(0, Math.min(12, Math.floor(safeNumber(cell && cell.y)))), terrain: ['P', 'F', 'H', 'W', 'G'].includes(cell && cell.terrain) ? cell.terrain : 'P', marker: sanitizeText(cell && cell.marker, 8), enemyCount, downedEnemyCount: Math.max(0, Math.min(enemyCount, Math.floor(safeNumber(cell && cell.downedEnemyCount)))), event: sanitizeText(cell && cell.event, 20), eventMarker: sanitizeText(cell && cell.eventMarker, 4), monster: sanitizeText(cell && cell.monster, 20), bossArea: Boolean(cell && cell.bossArea), exit: Boolean(cell && cell.exit), clue: Boolean(cell && cell.clue), known: Boolean(cell && cell.known), landmark: sanitizeText(cell && cell.landmark, 28) }; }),
+      players: (Array.isArray(rawBounty.players) ? rawBounty.players : []).slice(0, 6).map((player) => ({ name: sanitizeText(player && player.name, 18), teamId: Math.max(0, Math.floor(safeNumber(player && player.teamId))), level: Math.max(1, Math.floor(safeNumber(player && player.level, 1))), skillPoints: Math.max(5, Math.floor(safeNumber(player && player.skillPoints, 5))), fieldTraitCount: Math.max(0, Math.floor(safeNumber(player && player.fieldTraitCount))), fieldTraits: (Array.isArray(player && player.fieldTraits) ? player.fieldTraits : []).slice(0, 4).map((name) => sanitizeText(name, 16)), traits: (Array.isArray(player && player.traits) ? player.traits : []).slice(0, 8).map((name) => sanitizeText(name, 18)), items: (Array.isArray(player && player.items) ? player.items : []).slice(0, 4).map((name) => sanitizeText(name, 18)), status: sanitizeText(player && player.status, 18), isBot: Boolean(player && player.isBot), isGuest: Boolean(player && player.isGuest), bounty: Boolean(player && player.bounty), pos: sanitizeText(player && player.pos, 4), hp: Math.max(0, safeNumber(player && player.hp)), maxHp: Math.max(1, safeNumber(player && player.maxHp, 150)), stamina: Math.max(0, Math.min(3, safeNumber(player && player.stamina))), weapon: sanitizeText(player && player.weapon, 24), weapons: (Array.isArray(player && player.weapons) ? player.weapons : []).slice(0, 2).map((name) => sanitizeText(name, 28)), activeWeaponIndex: Math.max(0, Math.min(1, Math.floor(safeNumber(player && player.activeWeaponIndex)))), ammo: Math.max(0, safeNumber(player && player.ammo)), reserve: Math.max(0, safeNumber(player && player.reserve)), kills: Math.max(0, safeNumber(player && player.kills)), clues: Math.max(0, safeNumber(player && player.clues)) })),
+      events: (Array.isArray(rawBounty.events) ? rawBounty.events : []).slice(0, 12).map((event) => ({ type: sanitizeText(event && event.type, 20), name: sanitizeText(event && event.name, 24), pos: sanitizeText(event && event.pos, 4), state: sanitizeText(event && event.state, 12) })),
+      monsters: (Array.isArray(rawBounty.monsters) ? rawBounty.monsters : []).slice(0, 12).map((monster) => ({ type: sanitizeText(monster && monster.type, 20), name: sanitizeText(monster && monster.name, 20), pos: sanitizeText(monster && monster.pos, 4), hp: Math.max(0, safeNumber(monster && monster.hp)), maxHp: Math.max(1, safeNumber(monster && monster.maxHp, 1)), status: sanitizeText(monster && monster.status, 16) })),
+      activeEventCount: Math.max(0, Math.floor(safeNumber(rawBounty.activeEventCount))), aliveMonsterCount: Math.max(0, Math.floor(safeNumber(rawBounty.aliveMonsterCount))), weather: sanitizeText(rawBounty.weather, 16),
+      publicEvents: (Array.isArray(rawBounty.publicEvents) ? rawBounty.publicEvents : []).slice(-8).map((line) => sanitizeText(line, 140)), ownLogs: (Array.isArray(rawBounty.ownLogs) ? rawBounty.ownLogs : []).slice(-4).map((line) => sanitizeText(line, 140)), ownActions: (Array.isArray(rawBounty.ownActions) ? rawBounty.ownActions : []).slice(0, 2).map((action) => sanitizeText(action && action.type, 18)),
+      help: (Array.isArray(rawBounty.help) ? rawBounty.help : []).slice(0, 6).map((line) => sanitizeText(line, 100))
+    } : null,
+    demonScene: rawDemon ? {
+      mode: sanitizeText(rawDemon.mode, 16), menuTab: sanitizeText(rawDemon.menuTab, 16), roomId: sanitizeText(rawDemon.roomId, 32), modeKey: sanitizeText(rawDemon.modeKey, 16), modeMultiplier: Math.max(0.1, Math.min(3, safeNumber(rawDemon.modeMultiplier, 1))),
+      round: Math.max(0, Math.floor(safeNumber(rawDemon.round))), turn: sanitizeText(rawDemon.turn, 24), viewerCurrent: Boolean(rawDemon.viewerCurrent), viewerItems: Array.isArray(rawDemon.viewerItems) ? rawDemon.viewerItems.slice(0, 12).map((x) => sanitizeText(x, 18)) : [],
+      shells: rawDemon.shells == null ? null : (Array.isArray(rawDemon.shells) ? rawDemon.shells.slice(0, 16).map((v) => v ? 1 : 0) : []),
+      shellCount: Math.max(0, Math.floor(safeNumber(rawDemon.shellCount))), shellLive: Math.max(0, Math.floor(safeNumber(rawDemon.shellLive))), shellBlank: Math.max(0, Math.floor(safeNumber(rawDemon.shellBlank))), glassActive: Boolean(rawDemon.glassActive), glassResult: rawDemon.glassActive ? sanitizeText(rawDemon.glassResult, 8) : '', logTitle: sanitizeText(rawDemon.logTitle, 24), rules: sanitizeText(rawDemon.rules, 180),
+      players: (Array.isArray(rawDemon.players) ? rawDemon.players : []).slice(0, 4).map((p, i) => ({ index: Math.max(1, Math.floor(safeNumber(p && p.index, i + 1))), name: sanitizeText(p && p.name, 24) || '玩家', hp: Math.max(0, safeNumber(p && p.hp)), maxHp: Math.max(1, safeNumber(p && p.maxHp, 1)), amulets: Math.max(0, Math.floor(safeNumber(p && p.amulets))), items: Array.isArray(p && p.items) ? p.items.slice(0, 12).map((x) => sanitizeText(x, 18)) : Math.max(0, Math.floor(safeNumber(p && p.items))), runes: Array.isArray(p && p.runes) ? p.runes.slice(0, 8).map((x) => sanitizeText(x, 18)) : [], current: Boolean(p && p.current), dead: Boolean(p && p.dead), damage: Math.max(0, safeNumber(p && p.damage)), kills: Math.max(0, safeNumber(p && p.kills)) })),
+      logs: (Array.isArray(rawDemon.logs) ? rawDemon.logs : []).slice(-24).map((x) => sanitizeText(x, 120)),
+      modes: (Array.isArray(rawDemon.modes) ? rawDemon.modes : []).slice(0, 12).map((m) => ({ name: sanitizeText(m && m.name, 16), hp: Array.isArray(m && m.hp) ? m.hp.slice(0, 2).map((value) => sanitizeText(value, 8)).join('/') : sanitizeText(m && m.hp, 12), desc: sanitizeText(m && m.desc, 100), multiplier: Math.max(0.1, Math.min(3, safeNumber(m && m.multiplier, 1))) })),
+      items: (Array.isArray(rawDemon.items) ? rawDemon.items : []).slice(0, 16).map((m) => ({ name: sanitizeText(m && m.name, 16), desc: sanitizeText(m && m.desc, 100) })),
+      runes: (Array.isArray(rawDemon.runes) ? rawDemon.runes : []).slice(0, 12).map((m) => ({ name: sanitizeText(m && m.name, 16), desc: sanitizeText(m && m.desc, 100) }))
+    } : null,
+    workScene: rawWork ? normalizeWorkScene(rawWork) : null,
+    alchemyTable: rawAlchemy ? normalizeAlchemyTable(rawAlchemy) : null,
+    fourKnifeTable: normalizeFourKnifeTable(rawFourKnife)
+  };
+}
+
+function normalizeFourKnifeTable(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    status: ['menu', 'waiting', 'arranging', 'betting', 'showdown', 'finished'].includes(raw.status) ? raw.status : 'waiting',
+    mode: sanitizeText(raw.mode, 16) || 'pve',
+    phase: sanitizeText(raw.phase, 16) || '',
+    round: Math.max(1, Math.floor(safeNumber(raw.round, 1))),
+    pot: Math.max(0, safeNumber(raw.pot)),
+    carryPot: Math.max(0, safeNumber(raw.carryPot)),
+    isRollover: Boolean(raw.isRollover),
+    currentTurn: Math.max(0, Math.floor(safeNumber(raw.currentTurn))),
+    highestBet: Math.max(0, safeNumber(raw.highestBet)),
+    lastAction: sanitizeText(raw.lastAction, 160),
+    nextAction: sanitizeText(raw.nextAction, 160),
+    seats: (Array.isArray(raw.seats) ? raw.seats : []).slice(0, 6).map((seat) => ({
+      id: sanitizeText(seat && seat.id, 64),
+      name: sanitizeText(seat && seat.name, 18) || '玩家',
+      isBot: Boolean(seat && seat.isBot),
+      isGuest: Boolean(seat && seat.isGuest),
+      isTurn: Boolean(seat && seat.isTurn),
+      chips: safeNumber(seat && seat.chips),
+      currentBet: Math.max(0, safeNumber(seat && seat.currentBet)),
+      folded: Boolean(seat && seat.folded),
+      arranged: Boolean(seat && seat.arranged),
+      isFoul: Boolean(seat && seat.isFoul),
+      isLeader: Boolean(seat && seat.isLeader),
+      isFourOfAKind: Boolean(seat && seat.isFourOfAKind),
+      isSweepWinner: Boolean(seat && seat.isSweepWinner),
+      isFrontWinner: Boolean(seat && seat.isFrontWinner),
+      isBackWinner: Boolean(seat && seat.isBackWinner),
+      cards: (Array.isArray(seat && seat.cards) ? seat.cards : []).slice(0, 4).map(normalizePlayingCard).filter(Boolean),
+      front: (Array.isArray(seat && seat.front) ? seat.front : []).slice(0, 2).map(normalizePlayingCard).filter(Boolean),
+      back: (Array.isArray(seat && seat.back) ? seat.back : []).slice(0, 2).map(normalizePlayingCard).filter(Boolean),
+      frontHand: seat && seat.frontHand && typeof seat.frontHand === 'object' ? {
+        level: safeNumber(seat.frontHand.level),
+        text: sanitizeText(seat.frontHand.text, 30),
+        name: sanitizeText(seat.frontHand.name, 20),
+        score: safeNumber(seat.frontHand.score)
+      } : null,
+      backHand: seat && seat.backHand && typeof seat.backHand === 'object' ? {
+        level: safeNumber(seat.backHand.level),
+        text: sanitizeText(seat.backHand.text, 30),
+        name: sanitizeText(seat.backHand.name, 20),
+        score: safeNumber(seat.backHand.score)
+      } : null
+    })),
+    logs: (Array.isArray(raw.logs) ? raw.logs : []).slice(-6).map((x) => sanitizeText(x, 180))
   };
 }
 
@@ -757,7 +1103,6 @@ function drawRankings(ctx, rankings, accent) {
 
 function drawSceneHeader(ctx, view, accent) {
   ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
   ctx.textAlign = 'left';
@@ -831,25 +1176,25 @@ function drawPlayingCardSuit(ctx, suit, centerX, centerY, size) {
 }
 
 function drawPlayingCard(ctx, card, x, y, width, height) {
-  roundedRect(ctx, x, y, width, height, 6);
+  roundedRect(ctx, x, y, width, height, Math.max(4, Math.floor(width * 0.12)));
   if (!card || card.hidden) {
     ctx.fillStyle = '#162f39';
     ctx.fill();
     ctx.strokeStyle = '#d7bc71';
     ctx.lineWidth = 2;
     ctx.stroke();
-    roundedRect(ctx, x + 6, y + 6, width - 12, height - 12, 4);
+    roundedRect(ctx, x + 5, y + 5, width - 10, height - 10, 3);
     ctx.strokeStyle = 'rgba(215,188,113,0.55)';
     ctx.lineWidth = 1;
     ctx.stroke();
     ctx.fillStyle = 'rgba(215,188,113,0.22)';
     for (let offset = -height; offset < width; offset += 12) {
-      ctx.fillRect(x + Math.max(7, offset), y + 8, 2, height - 16);
+      ctx.fillRect(x + Math.max(6, offset), y + 6, 2, height - 12);
     }
     ctx.fillStyle = '#d7bc71';
-    ctx.font = `700 ${Math.max(14, Math.floor(width * 0.28))}px "Microsoft YaHei", sans-serif`;
+    ctx.font = `700 ${Math.max(12, Math.floor(width * 0.28))}px "Microsoft YaHei", sans-serif`;
     ctx.textAlign = 'center';
-    ctx.fillText('YAN', x + width / 2, y + height / 2 + 6, width - 10);
+    ctx.fillText('YAN', x + width / 2, y + height / 2 + 5, width - 8);
     ctx.textAlign = 'left';
     return;
   }
@@ -860,10 +1205,15 @@ function drawPlayingCard(ctx, card, x, y, width, height) {
   ctx.stroke();
   const red = card.suit === 'H' || card.suit === 'D';
   ctx.fillStyle = red ? '#c83f49' : '#172124';
-  const rankFontSize = Math.max(17, Math.floor(width * 0.34));
+  const rank = String(card.rank || '');
+  const rankFontSize = rank.length > 1
+    ? Math.max(12, Math.floor(height * 0.28))
+    : Math.max(14, Math.floor(height * 0.34));
   ctx.font = `700 ${rankFontSize}px Georgia, serif`;
-  ctx.fillText(card.rank, x + 12, y + Math.max(25, Math.floor(rankFontSize * 0.92)), width - 20);
-  drawPlayingCardSuit(ctx, card.suit, x + width / 2, y + height * 0.64, Math.min(width * 0.43, height * 0.34));
+  ctx.textAlign = 'center';
+  ctx.fillText(rank, x + width / 2, y + Math.round(height * 0.38), width - 6);
+  ctx.textAlign = 'left';
+  drawPlayingCardSuit(ctx, card.suit, x + width / 2, y + Math.round(height * 0.70), Math.min(width * 0.40, height * 0.28));
 }
 
 function pokerSeatPositions(count) {
@@ -981,6 +1331,327 @@ function drawPokerTable(ctx, view, accent) {
   ctx.textAlign = 'right'; ctx.fillText(view.quote || '公开桌面默认隐藏所有底牌', 1146, 876, 1040); ctx.textAlign = 'left';
 }
 
+function fourKnifeSeatPositions(count) {
+  const points = [
+    { x: 600, y: 155, side: 'top' },
+    { x: 990, y: 270, side: 'right' },
+    { x: 970, y: 630, side: 'right' },
+    { x: 600, y: 720, side: 'bottom' },
+    { x: 230, y: 630, side: 'left' },
+    { x: 210, y: 270, side: 'left' }
+  ];
+  if (count <= 2) return [points[0], points[3]];
+  if (count === 3) return [points[0], points[2], points[4]];
+  if (count === 4) return [points[0], points[1], points[3], points[5]];
+  if (count === 5) return [points[0], points[1], points[2], points[4], points[5]];
+  return points;
+}
+
+function drawFourKnifeSeat(ctx, seat, pos, isCurrentTurn) {
+  const width = 246;
+  const height = 132;
+  const x = Math.round(pos.x - width / 2);
+  const y = Math.round(pos.y - height / 2);
+
+  if (isCurrentTurn) {
+    ctx.save();
+    ctx.shadowColor = '#ffe48a';
+    ctx.shadowBlur = 16;
+  }
+  roundedRect(ctx, x, y, width, height, 8);
+  ctx.fillStyle = seat.folded ? 'rgba(25, 30, 32, 0.92)' : 'rgba(12, 22, 24, 0.94)';
+  ctx.fill();
+
+  let strokeColor = 'rgba(255,255,255,0.22)';
+  let strokeWidth = 1.5;
+  if (isCurrentTurn) { strokeColor = '#ffe48a'; strokeWidth = 2.8; }
+  else if (seat.isSweepWinner) { strokeColor = '#ffd700'; strokeWidth = 2.5; }
+  else if (seat.isFoul) { strokeColor = '#ef5350'; strokeWidth = 2.2; }
+  else if (seat.isLeader) { strokeColor = '#4fc3f7'; strokeWidth = 2; }
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = strokeWidth;
+  ctx.stroke();
+  if (isCurrentTurn) ctx.restore();
+
+  // 1. 玩家头部信息
+  ctx.fillStyle = isCurrentTurn ? '#ffe48a' : seat.isSweepWinner ? '#ffd700' : '#f4f1e9';
+  ctx.font = '700 17px "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(seat.name, x + 12, y + 24, 120);
+
+  // 标签 tags (AI / 游客 / 领跑免底注)
+  let tagX = x + 135;
+  if (seat.isBot) {
+    roundedRect(ctx, tagX, y + 10, 28, 16, 4);
+    ctx.fillStyle = 'rgba(126, 220, 157, 0.22)'; ctx.fill();
+    ctx.strokeStyle = '#7edc9d'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = '#7edc9d'; ctx.font = '700 11px "Microsoft YaHei", sans-serif'; ctx.fillText('AI', tagX + 6, y + 22);
+    tagX += 34;
+  }
+  if (seat.isGuest) {
+    roundedRect(ctx, tagX, y + 10, 38, 16, 4);
+    ctx.fillStyle = 'rgba(239, 141, 127, 0.22)'; ctx.fill();
+    ctx.strokeStyle = '#ef8d7f'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = '#ef8d7f'; ctx.font = '700 11px "Microsoft YaHei", sans-serif'; ctx.fillText('游客', tagX + 5, y + 22);
+    tagX += 44;
+  }
+  if (seat.isLeader) {
+    roundedRect(ctx, x + width - 78, y + 10, 68, 16, 4);
+    ctx.fillStyle = 'rgba(79, 195, 247, 0.25)'; ctx.fill();
+    ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = '#4fc3f7'; ctx.font = '700 11px "Microsoft YaHei", sans-serif'; ctx.fillText('领跑免注', x + width - 69, y + 22);
+  }
+
+  // 2. 下注与状态行
+  ctx.fillStyle = '#f3c969';
+  ctx.font = '700 13px "Microsoft YaHei", sans-serif';
+  ctx.fillText(`下注: ${seat.currentBet}`, x + 12, y + 42, 90);
+
+  ctx.textAlign = 'right';
+  let statusText = seat.arranged ? '已刁牌' : '待刁牌';
+  let statusColor = seat.arranged ? '#81c784' : '#fff1c4';
+  if (seat.folded) { statusText = '已弃牌'; statusColor = '#8e9996'; }
+  else if (seat.isFourOfAKind) { statusText = '四支刀'; statusColor = '#ce93d8'; }
+  else if (seat.isSweepWinner) { statusText = '独赢通吃'; statusColor = '#ffd700'; }
+  else if (seat.isFoul) { statusText = '相公判负'; statusColor = '#ef5350'; }
+  else if (seat.isFrontWinner && seat.isBackWinner) { statusText = '前后双赢'; statusColor = '#ffd700'; }
+  else if (seat.isFrontWinner) { statusText = '前墩领先'; statusColor = '#4dd0e1'; }
+  else if (seat.isBackWinner) { statusText = '后墩领先'; statusColor = '#4dd0e1'; }
+  ctx.fillStyle = statusColor;
+  ctx.font = '700 13px "Microsoft YaHei", sans-serif';
+  ctx.fillText(statusText, x + width - 12, y + 42, 120);
+  ctx.textAlign = 'left';
+
+  // 分割线
+  ctx.beginPath();
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  ctx.lineWidth = 1;
+  ctx.moveTo(x + 10, y + 48);
+  ctx.lineTo(x + width - 10, y + 48);
+  ctx.stroke();
+
+  // 3. 卡牌展示区
+  const hasSplit = Array.isArray(seat.front) && seat.front.length === 2 && Array.isArray(seat.back) && seat.back.length === 2;
+  const cardW = 34;
+  const cardH = 48;
+
+  if (hasSplit) {
+    const frontX = x + 12;
+    drawPlayingCard(ctx, seat.front[0], frontX, y + 54, cardW, cardH);
+    drawPlayingCard(ctx, seat.front[1], frontX + cardW + 4, y + 54, cardW, cardH);
+
+    ctx.beginPath();
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1;
+    ctx.moveTo(x + 122, y + 54);
+    ctx.lineTo(x + 122, y + 124);
+    ctx.stroke();
+
+    const backX = x + 130;
+    drawPlayingCard(ctx, seat.back[0], backX, y + 54, cardW, cardH);
+    drawPlayingCard(ctx, seat.back[1], backX + cardW + 4, y + 54, cardW, cardH);
+
+    ctx.font = '700 11px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = seat.isFrontWinner ? '#ffe48a' : 'rgba(255,255,255,0.72)';
+    const fText = seat.frontHand ? seat.frontHand.text : (seat.arranged ? '前墩 锁定' : '前墩');
+    ctx.fillText(fText, frontX, y + 120, 104);
+
+    ctx.fillStyle = seat.isBackWinner ? '#ffe48a' : 'rgba(255,255,255,0.72)';
+    const bText = seat.backHand ? seat.backHand.text : (seat.arranged ? '后墩 锁定' : '后墩');
+    ctx.fillText(bText, backX, y + 120, 104);
+  } else if (Array.isArray(seat.cards) && seat.cards.length === 4) {
+    const startCardsX = x + 16;
+    for (let i = 0; i < 4; i++) {
+      drawPlayingCard(ctx, seat.cards[i], startCardsX + i * (cardW + 18), y + 54, cardW, cardH);
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.font = '11px "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('手牌待刁牌', x + width / 2, y + 120, 140);
+    ctx.textAlign = 'left';
+  } else {
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.font = '13px "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('等待发牌...', x + width / 2, y + 88, 140);
+    ctx.textAlign = 'left';
+  }
+}
+
+function drawFourKnifeTable(ctx, view) {
+  const table = view.fourKnifeTable || {};
+  drawSceneHeader(ctx, view, '#f3c969');
+
+  if (table.status === 'menu') {
+    roundedRect(ctx, 54, 112, 1092, 716, 18);
+    ctx.fillStyle = 'rgba(18, 48, 38, 0.95)';
+    ctx.fill();
+    ctx.strokeStyle = '#9a713c';
+    ctx.lineWidth = 10;
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#f3c969';
+    ctx.font = '700 34px "Microsoft YaHei", sans-serif';
+    ctx.fillText('四只刀 (Four-Knife Poker) · 牌桌大厅', 600, 168);
+
+    const cards = [
+      {
+        x: 88, y: 212, title: '人机对战 (PvE)', color: '#5fae91',
+        lines: ['1 真人 + 3 位 AI 机器人', '底注 100 游戏币 · 独赢通吃', '暗牌防窥 · 快速开局开打', '指令：.四只刀 人机']
+      },
+      {
+        x: 430, y: 212, title: '组队开房 (PvP)', color: '#6d93c9',
+        lines: ['2～6 人群友实时联机对战', '房主可随时添加机器人补位', '游客低保保护 · 真实筹码结算', '指令：.四只刀 开房']
+      },
+      {
+        x: 772, y: 212, title: '延长滚存赛', color: '#e57373',
+        lines: ['无人双赢时底池全额滚存', '平手领跑者下局免收底注', '输家可买进上诉继续争夺', '指令：.四只刀 下一局']
+      }
+    ];
+    cards.forEach((card) => {
+      roundedRect(ctx, card.x, card.y, 300, 285, 14);
+      ctx.fillStyle = 'rgba(7, 18, 16, 0.84)'; ctx.fill();
+      ctx.strokeStyle = card.color; ctx.lineWidth = 3; ctx.stroke();
+      ctx.fillStyle = card.color; ctx.font = '700 24px "Microsoft YaHei", sans-serif';
+      ctx.fillText(card.title, card.x + 150, card.y + 46);
+      ctx.fillStyle = '#e6ece8'; ctx.font = '15px "Microsoft YaHei", sans-serif';
+      card.lines.forEach((line, i) => ctx.fillText(line, card.x + 150, card.y + 98 + i * 36, 260));
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      roundedRect(ctx, card.x + 28, card.y + 235, 244, 34, 17); ctx.fill();
+    });
+
+    roundedRect(ctx, 100, 525, 1000, 225, 14);
+    ctx.fillStyle = 'rgba(7, 18, 16, 0.80)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(243, 201, 105, 0.4)'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = '#f3c969'; ctx.font = '700 20px "Microsoft YaHei", sans-serif';
+    ctx.fillText('牌型层级与核心规则', 600, 558);
+    ctx.fillStyle = '#ffd54f'; ctx.font = '700 16px "Microsoft YaHei", sans-serif';
+    ctx.fillText('四支刀(起手4同点通吃)  >  对子(AA~22)  >  罗梭(任意人头公牌等大)  >  点数牌(9.5点~0点)', 600, 592, 930);
+    ctx.fillStyle = '#d7dfdb'; ctx.font = '15px "Microsoft YaHei", sans-serif';
+    ctx.fillText('刁牌约束：手牌拆为前墩2张与后墩2张，后墩必须 ≥ 前墩，违规判相公直接判负！', 600, 628, 930);
+    ctx.fillText('获胜约束：唯有在前墩与后墩同时击败所有其他玩家（双赢）方能通吃彩池！', 600, 662, 930);
+    ctx.fillText('操作指令：.四只刀 人机 / 开房 / 加入 / 机器人 / 刁牌 1,2 / 智能 / 看牌 / 跟注 / 弃牌', 600, 696, 930);
+
+    ctx.fillStyle = '#bfc9c6'; ctx.font = '14px "Microsoft YaHei", sans-serif';
+    ctx.fillText(view.quote || '点击下方按钮或发送指令开启四只刀对决；公开桌面默认隐藏手牌，点击私聊看牌查看。', 600, 792, 1000);
+    ctx.textAlign = 'left';
+    return;
+  }
+
+  // 1. 中央赌桌绿呢与木质边框 (德州风格)
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.7)';
+  ctx.shadowBlur = 35;
+  ctx.beginPath();
+  ctx.ellipse(600, 447, 470, 280, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(18, 65, 52, 0.96)';
+  ctx.fill();
+  ctx.restore();
+
+  ctx.beginPath();
+  ctx.ellipse(600, 447, 470, 280, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = '#754b28';
+  ctx.lineWidth = 18;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.ellipse(600, 447, 448, 258, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(239,213,151,0.42)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.035)';
+  ctx.beginPath();
+  ctx.ellipse(600, 447, 365, 185, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 2. 牌桌中央主信息徽章
+  const stageMap = {
+    waiting: '等待入座',
+    arranging: '刁牌中 (前2+后2)',
+    betting: '押注轮',
+    showdown: table.isRollover ? '平手滚存' : '比牌结算',
+    finished: '比赛结束'
+  };
+  const stageName = stageMap[table.status] || table.status || '对局中';
+
+  ctx.textAlign = 'center';
+  roundedRect(ctx, 515, 285, 170, 32, 16);
+  ctx.fillStyle = 'rgba(5, 18, 17, 0.88)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(244, 210, 118, 0.55)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = '#e8efe9';
+  ctx.font = '700 15px "Microsoft YaHei", sans-serif';
+  ctx.fillText(`第 ${table.round || 1} 局 · ${stageName}`, 600, 307, 160);
+
+  // 彩池区域
+  const potVal = Math.floor(table.pot || 0);
+  const carryVal = Math.floor(table.carryPot || 0);
+  if (carryVal > 0) {
+    roundedRect(ctx, 410, 324, 380, 38, 19);
+    ctx.fillStyle = 'rgba(180, 36, 36, 0.90)';
+    ctx.fill();
+    ctx.strokeStyle = '#ffd700';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 16px "Microsoft YaHei", sans-serif';
+    ctx.fillText(`【滚存彩池 ${carryVal} 币】  总奖池 ${potVal + carryVal} 币`, 600, 348, 360);
+  } else {
+    ctx.fillStyle = '#f4d276';
+    ctx.font = '700 22px "Microsoft YaHei", sans-serif';
+    ctx.fillText(`底池 ${potVal} 游戏币`, 490, 348, 190);
+    ctx.fillStyle = '#bfc9c6';
+    ctx.font = '16px "Microsoft YaHei", sans-serif';
+    ctx.fillText(`当前注 ${Math.floor(table.highestBet || 0)} 币`, 710, 348, 190);
+  }
+
+  // 3. 中央日志 / 动作面板 (德州扑克风格)
+  roundedRect(ctx, 335, 470, 530, 60, 8);
+  ctx.fillStyle = 'rgba(5, 18, 17, 0.82)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.fillStyle = '#e9e6dd';
+  ctx.font = '16px "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'center';
+  const actionText = table.lastAction || '牌桌等待下一步操作。';
+  const actionRows = wrapLine(ctx, actionText, 490).slice(0, 2);
+  actionRows.forEach((row, index) => ctx.fillText(row, 600, 494 + index * 22, 490));
+
+  if (table.nextAction) {
+    roundedRect(ctx, 350, 542, 500, 38, 19);
+    ctx.fillStyle = 'rgba(121, 72, 39, 0.92)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(244, 210, 118, 0.58)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = '#fff1c4';
+    ctx.font = '700 14px "Microsoft YaHei", sans-serif';
+    ctx.fillText(table.nextAction, 600, 566, 468);
+  }
+  ctx.textAlign = 'left';
+
+  // 4. 渲染各玩家座位卡片
+  const seats = Array.isArray(table.seats) ? table.seats : [];
+  const positions = fourKnifeSeatPositions(seats.length || 2);
+  seats.forEach((seat, idx) => {
+    drawFourKnifeSeat(ctx, seat, positions[idx], Boolean(seat.isTurn));
+  });
+
+  // 5. 底部引言与防窥说明
+  ctx.fillStyle = 'rgba(255,255,255,0.65)';
+  ctx.font = '14px "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(view.quote || '公开桌面默认隐藏所有底牌，发送【.四只刀 看牌】或点击按钮私聊查看', 1146, 876, 1040);
+  ctx.textAlign = 'left';
+}
+
 function drawNumberCard(ctx, card, x, y, width, height) {
   roundedRect(ctx, x, y, width, height, 7);
   if (!card || card.hidden) {
@@ -1081,23 +1752,32 @@ function drawTutorial(ctx, view, accent) {
   const tutorial = view.tutorial; drawSceneHeader(ctx, view, accent);
   roundedRect(ctx, 52, 116, 1096, 712, 8); ctx.fillStyle = 'rgba(10,15,16,0.88)'; ctx.fill();
   ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 1; ctx.stroke();
-  const gapX = 22; const cardWidth = (1024 - gapX) / 2; const rowHeight = tutorial.entries.length > 8 ? 112 : 128;
-  tutorial.entries.forEach((entry, index) => {
-    const column = index % 2; const row = Math.floor(index / 2); const x = 88 + column * (cardWidth + gapX); const y = 154 + row * rowHeight;
-    roundedRect(ctx, x, y, cardWidth, rowHeight - 16, 7); ctx.fillStyle = 'rgba(255,255,255,0.065)'; ctx.fill();
-    ctx.fillStyle = index % 3 === 0 ? accent : index % 3 === 1 ? '#82d5d0' : '#ef8d7f'; ctx.fillRect(x, y, 5, rowHeight - 16);
-    ctx.fillStyle = '#f5f1e8'; ctx.font = '700 19px "Microsoft YaHei", sans-serif'; ctx.fillText(entry.title, x + 20, y + 29, 270);
-    ctx.textAlign = 'right'; ctx.fillStyle = '#d5ba70'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(entry.tag, x + cardWidth - 16, y + 27, 150); ctx.textAlign = 'left';
-    ctx.fillStyle = '#c7cfcc'; ctx.font = '15px "Microsoft YaHei", sans-serif';
-    const rows = wrapLine(ctx, entry.description, cardWidth - 40).slice(0, 3);
-    rows.forEach((line, lineIndex) => ctx.fillText(line, x + 20, y + 57 + lineIndex * 21, cardWidth - 40));
-  });
+  if (tutorial.layout === 'table' && tutorial.columns.length && tutorial.rows.length) {
+    const left = 76; const top = 148; const tableWidth = 1048; const sourceWidth = tutorial.columns.reduce((sum, column) => sum + column.width, 0); const scale = tableWidth / Math.max(1, sourceWidth); const headerHeight = 48; const rowHeight = Math.min(58, Math.floor(586 / Math.max(1, tutorial.rows.length)));
+    roundedRect(ctx, left, top, tableWidth, headerHeight, 5); ctx.fillStyle = 'rgba(200,149,73,0.28)'; ctx.fill();
+    let columnX = left;
+    tutorial.columns.forEach((column, index) => { const columnWidth = column.width * scale; ctx.fillStyle = index % 2 ? '#d6e5df' : '#ffd66e'; ctx.font = '700 14px "Microsoft YaHei", sans-serif'; ctx.textAlign = index === 0 ? 'center' : 'left'; ctx.fillText(column.title, columnX + (index === 0 ? columnWidth / 2 : 8), top + 30, columnWidth - 12); ctx.strokeStyle = 'rgba(255,255,255,0.13)'; ctx.strokeRect(columnX, top, columnWidth, headerHeight); columnX += columnWidth; });
+    tutorial.rows.forEach((row, rowIndex) => { const rowY = top + headerHeight + rowIndex * rowHeight; ctx.fillStyle = rowIndex % 2 ? 'rgba(255,255,255,0.035)' : 'rgba(255,255,255,0.075)'; ctx.fillRect(left, rowY, tableWidth, rowHeight); columnX = left; tutorial.columns.forEach((column, columnIndex) => { const columnWidth = column.width * scale; const value = row[columnIndex] || ''; ctx.fillStyle = columnIndex === 1 ? '#f7f1e6' : columnIndex === tutorial.columns.length - 1 ? '#b9cbc5' : '#d6dfda'; ctx.font = `${columnIndex === 1 ? '700 ' : ''}${rowHeight <= 50 ? 12 : 13}px "Microsoft YaHei", sans-serif`; ctx.textAlign = columnIndex === 0 ? 'center' : 'left'; ctx.fillText(value, columnX + (columnIndex === 0 ? columnWidth / 2 : 8), rowY + rowHeight / 2 + 5, columnWidth - 12); ctx.strokeStyle = 'rgba(255,255,255,0.09)'; ctx.strokeRect(columnX, rowY, columnWidth, rowHeight); columnX += columnWidth; }); }); ctx.textAlign = 'left';
+  } else {
+    const gapX = 22; const cardWidth = (1024 - gapX) / 2; const rowHeight = tutorial.entries.length > 8 ? 112 : 128;
+    tutorial.entries.forEach((entry, index) => {
+      const column = index % 2; const row = Math.floor(index / 2); const x = 88 + column * (cardWidth + gapX); const y = 154 + row * rowHeight;
+      roundedRect(ctx, x, y, cardWidth, rowHeight - 16, 7); ctx.fillStyle = 'rgba(255,255,255,0.065)'; ctx.fill();
+      ctx.fillStyle = index % 3 === 0 ? accent : index % 3 === 1 ? '#82d5d0' : '#ef8d7f'; ctx.fillRect(x, y, 5, rowHeight - 16);
+      ctx.fillStyle = '#f5f1e8'; ctx.font = '700 19px "Microsoft YaHei", sans-serif'; ctx.fillText(entry.title, x + 20, y + 29, 270);
+      ctx.textAlign = 'right'; ctx.fillStyle = '#d5ba70'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(entry.tag, x + cardWidth - 16, y + 27, 150); ctx.textAlign = 'left';
+      ctx.fillStyle = '#c7cfcc'; ctx.font = '15px "Microsoft YaHei", sans-serif';
+      const rows = wrapLine(ctx, entry.description, cardWidth - 40).slice(0, 3);
+      rows.forEach((line, lineIndex) => ctx.fillText(line, x + 20, y + 57 + lineIndex * 21, cardWidth - 40));
+    });
+  }
+  const quoteY = tutorial.layout === 'table' ? 814 : 748; const quoteRows = wrapLine(ctx, view.quote || '', 960).slice(0, tutorial.layout === 'table' ? 1 : 2);
+  if (quoteRows.length) { ctx.fillStyle = accent; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; quoteRows.forEach((line, index) => ctx.fillText(line, 600, quoteY + index * 20, 960)); ctx.textAlign = 'left'; }
   const dotsWidth = tutorial.total * 18; const startX = 600 - dotsWidth / 2;
   for (let page = 1; page <= tutorial.total; page++) {
     ctx.beginPath(); ctx.arc(startX + (page - 1) * 18, 791, page === tutorial.page ? 5 : 3, 0, Math.PI * 2);
     ctx.fillStyle = page === tutorial.page ? accent : 'rgba(255,255,255,0.35)'; ctx.fill();
   }
-  ctx.fillStyle = accent; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(view.quote, 600, 856, 1050); ctx.textAlign = 'left';
 }
 
 function scratchRule(type) {
@@ -1246,7 +1926,7 @@ function drawLotteryTicketRow(ctx, ticket, x, y, width, showDraw) {
   roundedRect(ctx, x, y, width, 72, 6); ctx.fillStyle = 'rgba(249,245,233,0.94)'; ctx.fill();
   ctx.strokeStyle = 'rgba(151,42,56,0.25)'; ctx.lineWidth = 1; ctx.stroke();
   ctx.fillStyle = '#742432'; ctx.font = '800 14px "Microsoft YaHei", sans-serif'; ctx.fillText(`${ticket.issue}期`, x + 16, y + 24, 100);
-  ctx.fillStyle = '#7b675d'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText(ticket.tier || '待开奖', x + 16, y + 48, 92);
+  ctx.fillStyle = '#7b675d'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText(`${ticket.tier || '待开奖'}${ticket.count > 1 ? ` · x${ticket.count}` : ''}`, x + 16, y + 48, 112);
   const hitValues = showDraw ? ticket.red.filter((value) => ticket.drawRed.includes(value)) : [];
   drawLotteryNumbers(ctx, ticket.red, ticket.blue, x + 132, y + 36, hitValues, showDraw && ticket.blueMatch, 17);
   ctx.textAlign = 'right'; ctx.fillStyle = ticket.prize > 0 ? '#b12b3c' : '#49605d'; ctx.font = '800 17px "Microsoft YaHei", sans-serif';
@@ -1268,8 +1948,10 @@ function drawLotteryScene(ctx, view) {
     ctx.fillStyle = '#7b5140'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText('红球 1-15 中选5个，不可重复', 82, 407);
     for (let index = 0; index < 4; index++) drawLotteryBall(ctx, 650 + index * 70, 284, index + 1, '#2878c7', false, 22);
     ctx.fillText('蓝球 1-4 中选1个', 620, 337);
-    roundedRect(ctx, 620, 365, 492, 58, 6); ctx.fillStyle = '#173f40'; ctx.fill();
-    ctx.fillStyle = '#f7e4a6'; ctx.font = '800 18px "Microsoft YaHei", sans-serif'; ctx.fillText('.双色球 1 2 3 4 5 1', 646, 400);
+    roundedRect(ctx, 620, 355, 492, 46, 6); ctx.fillStyle = '#173f40'; ctx.fill();
+    ctx.fillStyle = '#f7e4a6'; ctx.font = '800 16px "Microsoft YaHei", sans-serif'; ctx.fillText('单注  .双色球 1 2 3 4 5 1', 646, 384);
+    roundedRect(ctx, 620, 409, 492, 46, 6); ctx.fillStyle = '#214d4d'; ctx.fill();
+    ctx.fillStyle = '#d9f3d8'; ctx.font = '800 15px "Microsoft YaHei", sans-serif'; ctx.fillText('批量  机选10 · 多组用 / · 单组末尾xN', 646, 438);
     ctx.fillStyle = '#173f40'; ctx.font = '800 20px "Microsoft YaHei", sans-serif'; ctx.fillText('固定奖级', 82, 468);
     scene.prizeTable.forEach((row, index) => {
       const column = index % 4; const line = Math.floor(index / 4); const x = 82 + column * 257; const y = 492 + line * 78;
@@ -1279,13 +1961,15 @@ function drawLotteryScene(ctx, view) {
     });
   } else if (scene.mode === 'history') {
     ctx.fillStyle = '#173f40'; ctx.font = '800 20px "Microsoft YaHei", sans-serif'; ctx.fillText('个人兑奖记录', 78, 232); ctx.fillText('全局开奖记录', 650, 232);
-    scene.history.slice(0, 7).forEach((ticket, index) => {
+    ctx.fillStyle = '#8c6254'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText(`第 ${scene.page}/${scene.totalPages} 页 · ${scene.totalTickets}注 / ${scene.totalRows}组`, 1114, 232); ctx.textAlign = 'left';
+    scene.history.slice(0, 6).forEach((ticket, index) => {
       const y = 255 + index * 68; roundedRect(ctx, 72, y, 530, 56, 5); ctx.fillStyle = 'rgba(255,255,255,0.66)'; ctx.fill();
-      ctx.fillStyle = '#742432'; ctx.font = '800 13px "Microsoft YaHei", sans-serif'; ctx.fillText(`${ticket.issue}期 · ${ticket.tier}`, 88, y + 22, 170);
+      ctx.fillStyle = '#742432'; ctx.font = '800 13px "Microsoft YaHei", sans-serif'; ctx.fillText(`${ticket.issue}期 · ${ticket.tier}${ticket.count > 1 ? ` · x${ticket.count}` : ''}`, 88, y + 22, 210);
       ctx.fillStyle = '#49605d'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText(`命中${ticket.redMatches}红${ticket.blueMatch ? '+蓝' : ''}`, 88, y + 43);
       ctx.textAlign = 'right'; ctx.fillStyle = ticket.prize > 0 ? '#b12b3c' : '#647370'; ctx.font = '800 16px "Microsoft YaHei", sans-serif'; ctx.fillText(`${ticket.prize}币`, 584, y + 35); ctx.textAlign = 'left';
     });
-    scene.draws.slice(0, 7).forEach((draw, index) => {
+    scene.draws.slice(0, 6).forEach((draw, index) => {
       const y = 255 + index * 68; roundedRect(ctx, 638, y, 482, 56, 5); ctx.fillStyle = 'rgba(255,255,255,0.66)'; ctx.fill();
       ctx.fillStyle = '#742432'; ctx.font = '800 13px "Microsoft YaHei", sans-serif'; ctx.fillText(`${draw.issue}期`, 654, y + 20);
       drawLotteryNumbers(ctx, draw.red, draw.blue, 770, y + 29, [], false, 13);
@@ -1302,7 +1986,9 @@ function drawLotteryScene(ctx, view) {
     roundedRect(ctx, 72, 276, 1048, 74, 6); ctx.fillStyle = scene.mode === 'result' && scene.totalPrize > 0 ? '#fff0b0' : '#e6f0ec'; ctx.fill();
     ctx.fillStyle = scene.mode === 'result' && scene.totalPrize > 0 ? '#a52b3d' : '#173f40'; ctx.font = '800 23px "Microsoft YaHei", sans-serif';
     ctx.fillText(scene.mode === 'ticket' ? '选号已封存，等待开奖' : scene.mode === 'result' ? `兑奖完成 · 合计 ${scene.totalPrize} 游戏币` : '当前彩票状态', 94, 310);
-    ctx.fillStyle = '#66564e'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.status || '开奖后请主动兑奖。', 94, 335, 980);
+    ctx.fillStyle = '#66564e'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.status || '开奖后请主动兑奖。', 94, 335, 820);
+    ctx.textAlign = 'right'; ctx.fillStyle = '#8c6254'; ctx.font = '13px "Microsoft YaHei", sans-serif';
+    ctx.fillText(`第 ${scene.page}/${scene.totalPages} 页 · ${scene.totalTickets}注 / ${scene.totalRows}组`, 1110, 335); ctx.textAlign = 'left';
     const rows = scene.tickets.slice(0, 6); rows.forEach((ticket, index) => drawLotteryTicketRow(ctx, ticket, 72, 374 + index * 76, 1048, scene.mode === 'result' || ticket.tier !== '待开奖'));
     if (!rows.length) { ctx.fillStyle = '#7b675d'; ctx.font = '18px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText('当前没有待处理的彩票', 600, 500); ctx.textAlign = 'left'; }
   }
@@ -1471,16 +2157,20 @@ function drawVideoPokerSingleHand(ctx, scene) {
 
 function drawVideoPokerGamble(ctx, scene) {
   const left = scene.previousCard || scene.anchorCard; const right = scene.drawnCard || { hidden: true };
+  const actionLocked = scene.mode === 'revive' || scene.cashoutLocked;
   roundedRect(ctx, 110, 260, 980, 470, 12); ctx.fillStyle = 'rgba(8,17,19,0.93)'; ctx.fill();
   drawPlayingCard(ctx, left, 320, 314, 160, 220); drawPlayingCard(ctx, right, 720, 314, 160, 220);
   ctx.textAlign = 'center'; ctx.fillStyle = '#c4cfcc'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.previousCard ? '上张基准牌' : '当前基准牌', 400, 566); ctx.fillText(scene.drawnCard ? '本次翻牌' : '等待下一张', 800, 566);
   ctx.fillStyle = scene.correct === true ? '#82d5d0' : scene.correct === false ? '#ef8d7f' : '#f3c969'; ctx.font = '800 46px Arial, sans-serif';
   ctx.fillText(scene.correct === true ? '✓' : scene.correct === false ? '×' : '?', 600, 435);
   ctx.font = '800 18px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.guess || '比大 / 比小', 600, 474);
-  roundedRect(ctx, 230, 606, 740, 82, 8); ctx.fillStyle = scene.mode === 'revive' ? 'rgba(99,31,43,0.82)' : 'rgba(23,77,70,0.78)'; ctx.fill();
+  roundedRect(ctx, 230, 606, 740, 82, 8); ctx.fillStyle = actionLocked ? 'rgba(99,31,43,0.82)' : 'rgba(23,77,70,0.78)'; ctx.fill();
   ctx.fillStyle = '#f7f3ea'; ctx.font = '800 26px "Microsoft YaHei", sans-serif'; ctx.fillText(`待领 ${videoPokerNumber(scene.pendingPrize)}  ·  连中 ${scene.streak}/13`, 600, 640);
-  ctx.fillStyle = scene.mode === 'revive' ? '#f2b5d4' : '#c4cfcc'; ctx.font = '15px "Microsoft YaHei", sans-serif';
-  ctx.fillText(scene.mode === 'revive' ? `额外支付 ${videoPokerNumber(scene.reviveCost)} 游戏币 · 待领奖金不变` : '猜中倍率 ×1.3 · 相同点数也算失败', 600, 671); ctx.textAlign = 'left';
+  ctx.fillStyle = actionLocked ? '#f2b5d4' : '#c4cfcc'; ctx.font = '15px "Microsoft YaHei", sans-serif';
+  const actionText = scene.mode === 'revive'
+    ? `第${scene.reviveRound || scene.streak + 1}轮 · ${Math.round(scene.reviveRate * 100)}%复活费 ${videoPokerNumber(scene.reviveCost)}币 · 奖金不变`
+    : scene.cashoutLocked ? '复活锁定中 · 再猜中1轮后才可收下奖金' : '猜中倍率 ×1.3 · 相同点数也算失败';
+  ctx.fillText(actionText, 600, 671); ctx.textAlign = 'left';
   roundedRect(ctx, 300, 740, 600, 30, 15); ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fill();
   if (scene.streak > 0) { roundedRect(ctx, 300, 740, 600 * scene.streak / 13, 30, 15); ctx.fillStyle = '#f3c969'; ctx.fill(); }
   ctx.fillStyle = '#172124'; ctx.font = '800 13px Arial, sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`${scene.streak} / 13`, 600, 760); ctx.textAlign = 'left';
@@ -1702,9 +2392,9 @@ function drawFarkleTable(ctx, view) {
   ctx.beginPath(); ctx.ellipse(600, 438, 348, 177, 0, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,0.035)'; ctx.fill();
 
   ctx.textAlign = 'center'; ctx.fillStyle = '#cbd7d3'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText('胜利目标', 600, 228);
-  ctx.fillStyle = '#ffd66e'; ctx.font = '700 31px "Microsoft YaHei", sans-serif'; ctx.fillText(`${Math.floor(table.target)} 分`, 600, 261);
-  roundedRect(ctx, 455, 276, 290, 42, 21); ctx.fillStyle = 'rgba(7,18,19,0.78)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,214,110,0.46)'; ctx.lineWidth = 1.5; ctx.stroke();
-  ctx.fillStyle = '#f5f1e8'; ctx.font = '700 16px "Microsoft YaHei", sans-serif'; ctx.fillText(table.phaseLabel || '等待行动', 600, 303, 260);
+   ctx.fillStyle = '#ffd66e'; ctx.font = '700 31px "Microsoft YaHei", sans-serif'; ctx.fillText(`${Math.floor(table.target)} 分`, 600, 261);
+   roundedRect(ctx, 455, 276, 290, 42, 21); ctx.fillStyle = 'rgba(7,18,19,0.78)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,214,110,0.46)'; ctx.lineWidth = 1.5; ctx.stroke();
+   ctx.fillStyle = '#f5f1e8'; ctx.font = '700 16px "Microsoft YaHei", sans-serif'; ctx.fillText(`规则${table.ruleSet === 2 ? '2 · 扩展' : '1 · 默认'} · ${table.phaseLabel || '等待行动'}`, 600, 303, 270);
 
   const dieSize = 82; const dieGap = 17; const totalWidth = 6 * dieSize + 5 * dieGap; const diceStart = 600 - totalWidth / 2;
   if (table.status === 'finished') {
@@ -1735,7 +2425,7 @@ function drawFarkleTable(ctx, view) {
   let instruction = '发送：.快艇 投掷';
   if (table.status === 'waiting') instruction = '房主可添加机器人或等待玩家加入，然后发送“开始”';
   else if (table.status === 'finished') instruction = '结算已完成，可清理房间后开始下一局';
-  else if (table.phase === 'rolled') instruction = '发送：.快艇 选择 1,1,5';
+  else if (table.phase === 'rolled') instruction = '发送：.快艇 选择 1,1,5  或  115';
   else if (table.phase === 'kept') instruction = '发送：.快艇 投掷  或  .快艇 存分';
   roundedRect(ctx, 397, 555, 406, 38, 19); ctx.fillStyle = 'rgba(121,72,39,0.86)'; ctx.fill();
   ctx.fillStyle = '#fff1c4'; ctx.font = '700 14px "Microsoft YaHei", sans-serif'; ctx.fillText(instruction, 600, 580, 380);
@@ -1900,6 +2590,55 @@ function drawLoveTable(ctx, view) {
   ctx.fillStyle = 'rgba(255,255,255,0.68)'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(view.quote || 'PvE玩家手牌常亮；PvP双方私聊锁定并在群内同时公开', 600, 874, 1080); ctx.textAlign = 'left';
 }
 
+function drawLandlordTable(ctx, view) {
+  const table = view.landlordTable; drawSceneHeader(ctx, view, '#e4b85c');
+  if (table.status === 'menu') {
+    roundedRect(ctx, 54, 112, 1092, 716, 18); ctx.fillStyle = 'rgba(24,49,39,0.95)'; ctx.fill(); ctx.strokeStyle = '#9a713c'; ctx.lineWidth = 10; ctx.stroke();
+    ctx.textAlign = 'center'; ctx.fillStyle = '#f3c969'; ctx.font = '700 34px "Microsoft YaHei", sans-serif'; ctx.fillText('选择一张牌桌入座', 600, 170);
+    const cards = [
+      { x: 88, y: 215, title: '三人经典桌', color: '#5fae91', lines: ['单副54张 · 地主拿3张底牌', 'PvE / PvP · 单局50币', '允许三带一与飞机单翅'] },
+      { x: 430, y: 215, title: '四人双副桌', color: '#6d93c9', lines: ['双副108张 · 地主拿8张底牌', 'PvE / PvP · 单局50币', '允许A2345与23456顺子'] },
+      { x: 772, y: 215, title: '12副牌锦标赛', color: '#c58b55', lines: ['15人 / 20人AI补位', '入场500 · 三档奖励', '完整发牌与牌力投点'] }
+    ];
+    cards.forEach((card) => {
+      roundedRect(ctx, card.x, card.y, 300, 278, 14); ctx.fillStyle = 'rgba(7,18,16,0.82)'; ctx.fill(); ctx.strokeStyle = card.color; ctx.lineWidth = 3; ctx.stroke();
+      ctx.fillStyle = card.color; ctx.font = '700 25px "Microsoft YaHei", sans-serif'; ctx.fillText(card.title, card.x + 150, card.y + 50);
+      ctx.fillStyle = '#e6ece8'; ctx.font = '16px "Microsoft YaHei", sans-serif'; card.lines.forEach((line, i) => ctx.fillText(line, card.x + 150, card.y + 105 + i * 38, 260));
+      ctx.fillStyle = 'rgba(255,255,255,0.06)'; roundedRect(ctx, card.x + 28, card.y + 225, 244, 34, 17); ctx.fill();
+    });
+    roundedRect(ctx, 100, 540, 1000, 205, 14); ctx.fillStyle = 'rgba(7,18,16,0.78)'; ctx.fill();
+    ctx.fillStyle = '#f3c969'; ctx.font = '700 21px "Microsoft YaHei", sans-serif'; ctx.fillText('多局竞技', 600, 579);
+    ctx.fillStyle = '#d7dfdb'; ctx.font = '17px "Microsoft YaHei", sans-serif'; ctx.fillText('短时3局 · 中时6局 · 长时12局　｜　入场100　｜　最终优胜者获得双倍返还', 600, 618, 930);
+    ctx.fillText('出牌可以连续输入：333、TTT9、34567；数字10与字母T均可识别。', 600, 658, 930);
+    ctx.fillText('点击下方按钮选择人机、开房、时长或锦标赛。', 600, 698, 930);
+    ctx.fillStyle = '#bfc9c6'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(view.quote || '', 600, 790, 1000); ctx.textAlign = 'left'; return;
+  }
+  roundedRect(ctx, 54, 112, 1092, 716, 10); ctx.fillStyle = 'rgba(33,58,45,0.94)'; ctx.fill(); ctx.strokeStyle = '#8b6a38'; ctx.lineWidth = 12; ctx.stroke();
+  ctx.fillStyle = '#f3c969'; ctx.font = '700 24px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`第${table.round}局 · ${table.status === 'bidding' ? '叫地主' : table.status === 'landlordReveal' ? '明牌选择' : table.status === 'playing' ? '出牌中' : table.status === 'finished' ? '本局结算' : '等待入座'} · 倍率 ${table.multiplier}x`, 600, 154);
+  if (table.revealCard || (table.bottom && table.bottom.length)) {
+    roundedRect(ctx, 414, 174, 372, 76, 8); ctx.fillStyle = 'rgba(8,18,16,0.84)'; ctx.fill(); ctx.strokeStyle = '#d7b866'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = '#f0d28b'; ctx.font = '700 14px "Microsoft YaHei", sans-serif'; ctx.fillText(`亮牌：${table.revealPlayerName || '—'} · ${table.revealCard ? `${table.revealCard.rank}${table.revealCard.suit || ''}` : '—'}（首位叫地主）`, 600, 198);
+    ctx.fillStyle = '#f7f3ea'; ctx.font = '700 17px Arial, sans-serif'; const bottomText = table.status === 'bidding' || table.status === 'waiting' ? '地主确定后公开' : ((table.bottom || []).map((card) => `${card.rank}${card.suit || ''}`).join(' ') || '—'); ctx.fillText(`底牌：${bottomText}`, 600, 227, 350);
+  }
+  const players = table.players || []; // 四人桌按座位逆时针排列：左上 → 左下 → 右下 → 右上。
+  const positions = players.length === 4 ? [[95, 205], [95, 565], [775, 565], [775, 205]] : [[95, 205], [775, 205], [435, 565]];
+  players.forEach((player, index) => {
+    const [x, y] = positions[index] || [95, 205]; const w = 330; const h = 180;
+    roundedRect(ctx, x, y, w, h, 10); ctx.fillStyle = player.isTurn ? 'rgba(243,201,105,0.22)' : 'rgba(6,19,17,0.72)'; ctx.fill(); ctx.strokeStyle = player.isTurn ? '#f3c969' : 'rgba(255,255,255,0.2)'; ctx.lineWidth = player.isTurn ? 3 : 1; ctx.stroke();
+    ctx.fillStyle = '#f5f1e8'; ctx.font = '700 21px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'left'; ctx.fillText(`${player.name}`, x + 18, y + 34, w - 36);
+    ctx.fillStyle = player.role === 'landlord' ? '#ef8d7f' : '#82d5d0'; ctx.font = '700 17px "Microsoft YaHei", sans-serif'; const openTag = table.openLandlord && player.role === 'landlord' ? ' · 明牌' : ''; ctx.fillText(`${player.role === 'landlord' ? '地主' : player.role === 'farmer' ? '农民' : '待定'}${openTag}`, x + 18, y + 62);
+    ctx.fillStyle = '#cfd7d4'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.fillText(`剩余手牌：${player.handCount}`, x + 18, y + 91);
+    if (player.hand && player.hand.length) { ctx.fillStyle = '#f7f3ea'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(player.hand.map((card) => `${card.rank}${card.suit || ''}`).join(' '), x + 18, y + 128, w - 36); }
+    else if (player.lastAction) { ctx.fillStyle = '#aebbb7'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(`上一行动：${player.lastAction}`, x + 18, y + 128, w - 36); }
+  });
+  roundedRect(ctx, 410, 315, 380, 150, 12); ctx.fillStyle = 'rgba(7,16,14,0.78)'; ctx.fill(); ctx.strokeStyle = '#e4b85c'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#cfd7d4'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(table.displayPlayerName ? `${table.displayPlayerName} 的上一手${table.displayPassed ? ' · 后续有人不出' : ''}` : '桌面牌', 600, 345);
+  ctx.fillStyle = '#f7f3ea'; ctx.font = '700 28px Arial, sans-serif'; ctx.fillText((table.currentPlay || []).map((card) => `${card.rank}${card.suit || ''}`).join(' ') || '等待出牌', 600, 400, 340);
+  ctx.fillStyle = '#f3c969'; ctx.font = '700 20px "Microsoft YaHei", sans-serif'; ctx.fillText(`当前轮到：${players[table.current] ? players[table.current].name : '—'}`, 600, 438);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#bfc9c6'; ctx.font = '15px "Microsoft YaHei", sans-serif'; (table.logs || []).slice(-4).forEach((log, i) => ctx.fillText(`· ${log}`, 90, 785 + i * 18, 1020));
+  ctx.textAlign = 'center'; ctx.fillStyle = '#e4b85c'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(view.quote || '10可写T；按钮可将手牌指令填入聊天框后再发送。', 600, 872, 1080); ctx.textAlign = 'left';
+}
+
 function fishRarityColor(rarity) {
   return ['#bdc9c5', '#6fd3c6', '#a98ce6', '#f0bd4c'][Math.max(0, Math.min(3, rarity))];
 }
@@ -1915,6 +2654,24 @@ function drawFishIcon(ctx, x, y, scale, color, facingLeft) {
   ctx.beginPath(); ctx.arc(31 * scale, -8 * scale, 1.5 * scale, 0, Math.PI * 2); ctx.fillStyle = '#f5f1e8'; ctx.fill();
   ctx.strokeStyle = 'rgba(15,45,48,0.55)'; ctx.lineWidth = Math.max(1, 2 * scale); ctx.beginPath(); ctx.arc(48 * scale, 2 * scale, 11 * scale, Math.PI * 0.65, Math.PI * 1.35); ctx.stroke();
   ctx.restore();
+}
+
+function drawFishPortrait(ctx, sprites, fish, x, y, width, height, locked = false) {
+  const info = fishAssetInfo(fish && fish.asset); const sprite = info ? sprites.get(info.asset) : null;
+  if (!sprite) return false;
+  const padding = Math.max(2, Math.min(width, height) * 0.05);
+  const scale = Math.min((width - padding * 2) / sprite.width, (height - padding * 2) / sprite.height);
+  const drawWidth = sprite.width * scale; const drawHeight = sprite.height * scale;
+  const drawX = x + (width - drawWidth) / 2; const drawY = y + (height - drawHeight) / 2;
+  ctx.save(); roundedRect(ctx, x, y, width, height, Math.min(12, height * 0.12)); ctx.clip();
+  ctx.globalAlpha = locked ? 0.18 : 1;
+  ctx.drawImage(sprite, drawX, drawY, drawWidth, drawHeight);
+  ctx.globalAlpha = 1;
+  if (locked) {
+    ctx.fillStyle = 'rgba(190,211,205,0.40)'; ctx.font = `700 ${Math.max(22, Math.floor(height * 0.38))}px Georgia, serif`; ctx.textAlign = 'center';
+    ctx.fillText('?', x + width / 2, y + height * 0.65); ctx.textAlign = 'left';
+  }
+  ctx.restore(); return true;
 }
 
 function drawFishingPerson(ctx, snapped) {
@@ -1947,7 +2704,7 @@ function drawRiskDial(ctx, risk, x, y) {
   ctx.fillStyle = '#bdc9c5'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText('断线风险', x, y + 36); ctx.textAlign = 'left';
 }
 
-function drawFishingMenu(ctx, view) {
+function drawFishingMenu(ctx, view, sprites) {
   const scene = view.fishingScene; drawSceneHeader(ctx, view, '#82d5d0');
   const colors = [
     { top: '#326e58', water: '#7fc7a2', label: '静水 · 新手' },
@@ -1963,16 +2720,20 @@ function drawFishingMenu(ctx, view) {
     gradient.addColorStop(0, palette.top); gradient.addColorStop(1, palette.water); ctx.fillStyle = gradient; ctx.fill();
     ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 2;
     for (let wave = 0; wave < 4; wave++) { ctx.beginPath(); ctx.ellipse(x + 165, y + 118 + wave * 10, 90 - wave * 12, 13, 0, 0, Math.PI * 2); ctx.stroke(); }
-    drawFishIcon(ctx, x + 168, y + 87, 0.72, index === 2 ? '#f3ce67' : '#d9f2ea', index % 2 === 1);
+    const heroFish = option.representatives[0];
+    if (!drawFishPortrait(ctx, sprites, heroFish, x + 80, y + 30, 176, 105)) drawFishIcon(ctx, x + 168, y + 87, 0.72, index === 2 ? '#f3ce67' : '#d9f2ea', index % 2 === 1);
     ctx.fillStyle = '#f4f1e9'; ctx.font = '700 31px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(option.name, x + width / 2, y + 216);
     ctx.fillStyle = '#91d8cf'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.fillText(palette.label, x + width / 2, y + 246);
     ctx.fillStyle = '#d9bb63'; ctx.font = '700 27px "Microsoft YaHei", sans-serif'; ctx.fillText(`${Math.floor(option.cost)} 游戏币`, x + width / 2, y + 298);
     ctx.fillStyle = '#b9c7c3'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.fillText(`初始断线风险 ${Math.round(option.risk)}%`, x + width / 2, y + 334);
     roundedRect(ctx, x + 28, y + 365, width - 56, 116, 10); ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fill();
-    ctx.fillStyle = '#f4f1e9'; ctx.font = '700 17px "Microsoft YaHei", sans-serif'; ctx.fillText('代表鱼获', x + width / 2, y + 397);
-    ctx.fillStyle = '#b9c7c3'; ctx.font = '15px "Microsoft YaHei", sans-serif';
-    ctx.fillText(`${option.fish[0] || '小鱼'} · ${option.fish[1] || '少见鱼'}`, x + width / 2, y + 428, width - 70);
-    ctx.fillStyle = '#f0bd4c'; ctx.fillText(`传说 · ${option.fish[3] || '未知'}`, x + width / 2, y + 459, width - 70);
+    (option.representatives.length ? option.representatives : option.fish.map((name, rarity) => ({ name, rarity, asset: '' }))).slice(0, 4).forEach((fish, fishIndex) => {
+      const portraitX = x + 39 + fishIndex * 66; const portraitY = y + 377;
+      if (!drawFishPortrait(ctx, sprites, fish, portraitX, portraitY, 56, 58)) drawFishIcon(ctx, portraitX + 28, portraitY + 27, 0.25, fishRarityColor(fish.rarity), fishIndex % 2 === 1);
+      ctx.fillStyle = fishRarityColor(fish.rarity); ctx.font = '700 11px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(fish.name || '未知', portraitX + 28, y + 461, 61);
+    });
+    ctx.textAlign = 'center';
     ctx.fillStyle = '#82d5d0'; ctx.font = '700 15px "Microsoft YaHei", sans-serif'; ctx.fillText(`${Math.floor(option.speciesCount || 16)} 种鱼获 · 图鉴分区`, x + width / 2, y + 505);
     ctx.font = '700 17px "Microsoft YaHei", sans-serif'; ctx.fillText(`最高基础价值 ${Math.floor(option.maxValue)}`, x + width / 2, y + 530);
     roundedRect(ctx, x + 28, y + 550, width - 56, 45, 8); ctx.fillStyle = index === 2 ? '#8d6231' : '#195b59'; ctx.fill();
@@ -1982,9 +2743,47 @@ function drawFishingMenu(ctx, view) {
   ctx.fillStyle = '#dbe6e2'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(view.quote || scene.event, 600, 840, 1080); ctx.textAlign = 'left';
 }
 
-function drawFishingScene(ctx, view) {
+function drawFishingDex(ctx, view, sprites) {
+  const scene = view.fishingScene; drawSceneHeader(ctx, view, '#82d5d0');
+  roundedRect(ctx, 62, 112, 1076, 75, 12); ctx.fillStyle = 'rgba(7,19,21,0.91)'; ctx.fill();
+  const percentage = Math.round(scene.unlockedCount * 100 / Math.max(1, scene.totalSpecies));
+  ctx.fillStyle = '#f4f1e9'; ctx.font = '700 22px "Microsoft YaHei", sans-serif'; ctx.fillText(`${scene.name || '玩家'} 的鱼类图鉴`, 88, 145, 300);
+  ctx.fillStyle = '#82d5d0'; ctx.font = '700 18px "Microsoft YaHei", sans-serif'; ctx.fillText(`${scene.unlockedCount}/${scene.totalSpecies} · ${percentage}%`, 88, 173, 220);
+  roundedRect(ctx, 340, 143, 490, 14, 7); ctx.fillStyle = 'rgba(255,255,255,0.13)'; ctx.fill();
+  if (percentage > 0) { roundedRect(ctx, 340, 143, 490 * Math.min(1, percentage / 100), 14, 7); ctx.fillStyle = '#82d5d0'; ctx.fill(); }
+  ctx.textAlign = 'right'; ctx.fillStyle = '#f0bd4c'; ctx.font = '700 17px "Microsoft YaHei", sans-serif'; ctx.fillText(`第 ${scene.page} / ${scene.totalPages} 页`, 1110, 156); ctx.textAlign = 'left';
+
+  scene.dexEntries.forEach((fish, index) => {
+    const column = index % 4; const row = Math.floor(index / 4); const x = 62 + column * 269; const y = 205 + row * 147;
+    roundedRect(ctx, x, y, 250, 130, 10); ctx.fillStyle = fish.unlocked ? 'rgba(9,23,25,0.94)' : 'rgba(7,15,18,0.92)'; ctx.fill();
+    ctx.strokeStyle = fish.unlocked ? fishRarityColor(fish.rarity) : 'rgba(255,255,255,0.12)'; ctx.lineWidth = fish.unlocked ? 2 : 1; ctx.stroke();
+    if (!drawFishPortrait(ctx, sprites, fish, x + 10, y + 10, 100, 82, !fish.unlocked)) {
+      drawFishIcon(ctx, x + 60, y + 50, 0.38, fish.unlocked ? fishRarityColor(fish.rarity) : '#33413f', index % 2 === 1);
+      if (!fish.unlocked) { ctx.fillStyle = 'rgba(3,8,10,0.72)'; ctx.fillRect(x + 10, y + 10, 100, 82); }
+    }
+    ctx.fillStyle = fish.unlocked ? fishRarityColor(fish.rarity) : '#66716e'; ctx.font = '700 16px "Microsoft YaHei", sans-serif';
+    ctx.fillText(fish.unlocked ? fish.name : '未知鱼种', x + 121, y + 31, 116);
+    ctx.fillStyle = fish.unlocked ? '#c5d0cd' : '#626c69'; ctx.font = '13px "Microsoft YaHei", sans-serif';
+    ctx.fillText(`${fish.pond || '未知水域'} · ${fish.rarityName || '未知'}`, x + 121, y + 55, 116);
+    ctx.fillStyle = fish.unlocked ? '#f0bd4c' : '#56605d'; ctx.font = '700 12px "Microsoft YaHei", sans-serif';
+    ctx.fillText(fish.unlocked ? `捕获 ${fish.count} 次` : '尚未安全收杆', x + 121, y + 79, 116);
+    ctx.fillStyle = fish.unlocked ? '#b7c5c1' : '#56605d'; ctx.font = '11px "Microsoft YaHei", sans-serif';
+    ctx.fillText(fish.unlocked ? `${fish.smallestSize.toFixed(2)}–${fish.largestSize.toFixed(2)}kg` : '轮廓未解锁', x + 121, y + 100, 116);
+    ctx.fillStyle = 'rgba(255,255,255,0.34)'; ctx.font = '11px Arial, sans-serif'; ctx.fillText(fish.asset || '', x + 12, y + 119, 94);
+  });
+  const biggest = scene.biggestFish ? `${scene.biggestFish.name} ${scene.biggestFish.size.toFixed(2)}kg` : '尚无记录';
+  const smallest = scene.smallestFish ? `${scene.smallestFish.name} ${scene.smallestFish.size.toFixed(2)}kg` : '尚无记录';
+  roundedRect(ctx, 62, 805, 1076, 42, 10); ctx.fillStyle = 'rgba(7,19,21,0.91)'; ctx.fill();
+  ctx.fillStyle = '#f0bd4c'; ctx.font = '700 14px "Microsoft YaHei", sans-serif'; ctx.fillText(`历史最大 · ${biggest}`, 86, 832, 365);
+  ctx.fillStyle = '#82d5d0'; ctx.fillText(`历史最小 · ${smallest}`, 443, 832, 365);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#d5dfdc'; ctx.fillText(`.钓鱼 图鉴 ${scene.page < scene.totalPages ? scene.page + 1 : 1}`, 1110, 832, 275); ctx.textAlign = 'left';
+  ctx.fillStyle = '#d7e1de'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(view.quote || '安全收入鱼篓并结算后，真实鱼影才会点亮。', 600, 874, 1080); ctx.textAlign = 'left';
+}
+
+function drawFishingScene(ctx, view, sprites) {
   const scene = view.fishingScene;
-  if (scene.status === 'menu') { drawFishingMenu(ctx, view); return; }
+  if (scene.status === 'menu') { drawFishingMenu(ctx, view, sprites); return; }
+  if (scene.status === 'dex') { drawFishingDex(ctx, view, sprites); return; }
   drawSceneHeader(ctx, view, '#82d5d0');
   const lost = scene.outcome === 'lost' || scene.status === 'lost'; const banked = scene.status === 'banked';
   const tint = scene.pond === '大海' ? 'rgba(19,49,86,0.24)' : scene.pond === '江水' ? 'rgba(16,83,91,0.20)' : 'rgba(37,91,65,0.18)';
@@ -1996,10 +2795,13 @@ function drawFishingScene(ctx, view) {
 
   const latest = scene.haul.length ? scene.haul[scene.haul.length - 1] : null;
   if (latest && !lost) {
-    const scale = Math.max(0.65, Math.min(1.35, 0.62 + latest.size * 0.12));
-    drawFishIcon(ctx, 635, 438, scale, fishRarityColor(latest.rarity), false);
-    ctx.fillStyle = fishRarityColor(latest.rarity); ctx.font = '700 19px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText(`${latest.rarityName || '普通'} · ${latest.name}`, 635, 493, 330); ctx.textAlign = 'left';
+    const portraitX = 430; const portraitY = 310; const portraitWidth = 390; const portraitHeight = 190;
+    if (!drawFishPortrait(ctx, sprites, latest, portraitX, portraitY, portraitWidth, portraitHeight)) {
+      const scale = Math.max(0.65, Math.min(1.35, 0.62 + latest.size * 0.12)); drawFishIcon(ctx, 625, 402, scale, fishRarityColor(latest.rarity), false);
+    }
+    roundedRect(ctx, portraitX + 18, portraitY + 145, portraitWidth - 36, 34, 17); ctx.fillStyle = 'rgba(3,11,14,0.80)'; ctx.fill();
+    ctx.fillStyle = fishRarityColor(latest.rarity); ctx.font = '700 18px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(`${latest.rarityName || '普通'} · ${latest.name} · ${latest.size}kg`, 625, portraitY + 168, portraitWidth - 44); ctx.textAlign = 'left';
   } else if (lost) {
     ctx.fillStyle = '#ef8d7f'; ctx.font = '700 28px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText('鱼线断裂', 620, 414);
     ctx.fillStyle = '#f4d2cb'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.fillText(`损失 ${scene.lostCount} 条鱼 · ${Math.floor(scene.lostValue)} 币估值`, 620, 447); ctx.textAlign = 'left';
@@ -2042,7 +2844,7 @@ function drawFishingScene(ctx, view) {
     roundedRect(ctx, cardX, cardY, cardWidth, 111, 10); ctx.fillStyle = fish ? 'rgba(255,255,255,0.075)' : 'rgba(255,255,255,0.035)'; ctx.fill();
     ctx.strokeStyle = fish ? fishRarityColor(fish.rarity) : 'rgba(255,255,255,0.10)'; ctx.lineWidth = fish ? 2 : 1; ctx.stroke();
     if (fish) {
-      drawFishIcon(ctx, cardX + 52, cardY + 41, 0.38, fishRarityColor(fish.rarity), index % 2 === 1);
+      if (!drawFishPortrait(ctx, sprites, fish, cardX + 10, cardY + 10, 72, 64)) drawFishIcon(ctx, cardX + 47, cardY + 41, 0.31, fishRarityColor(fish.rarity), index % 2 === 1);
       ctx.fillStyle = fishRarityColor(fish.rarity); ctx.font = '700 15px "Microsoft YaHei", sans-serif'; ctx.fillText(fish.name, cardX + 91, cardY + 31, 95);
       ctx.fillStyle = '#c4cfcc'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(`${fish.rarityName} · ${fish.size}kg`, cardX + 91, cardY + 54, 95);
       ctx.fillStyle = '#f0bd4c'; ctx.font = '700 14px "Microsoft YaHei", sans-serif'; ctx.fillText(`${Math.floor(fish.value)}币`, cardX + 91, cardY + 80, 90);
@@ -2051,6 +2853,146 @@ function drawFishingScene(ctx, view) {
     }
   }
   ctx.fillStyle = '#d7e1de'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(view.quote || '每次继续都会提高稀有鱼机会，也会抬高断线风险', 600, 864, 1080); ctx.textAlign = 'left';
+}
+
+function fishingCardColor(card) {
+  return card && card.color === 'black' ? '#20252b' : '#d3424b';
+}
+
+function drawFishingCardFace(ctx, card, x, y, width, height, showFace = true) {
+  const c = card || { name: '', point: 0, color: 'red' };
+  const red = c.color !== 'black';
+  roundedRect(ctx, x, y, width, height, Math.min(10, width * 0.08));
+  // 旧式福建牌的米白纸张与红/黑粗双框，避免服务器缺少 Emoji 字体导致牌面空框。
+  ctx.fillStyle = '#f4edda'; ctx.fill();
+  ctx.strokeStyle = red ? '#b51f2d' : '#20242a'; ctx.lineWidth = Math.max(2, width * 0.035); ctx.stroke();
+  ctx.save(); roundedRect(ctx, x + 5, y + 5, width - 10, height - 10, Math.min(6, width * 0.05)); ctx.strokeStyle = red ? 'rgba(181,31,45,0.65)' : 'rgba(32,36,42,0.58)'; ctx.lineWidth = 1.2; ctx.stroke(); ctx.restore();
+  ctx.save(); roundedRect(ctx, x + 4, y + 4, width - 8, height - 8, Math.min(7, width * 0.06)); ctx.clip();
+  if (!showFace || c.hidden) {
+    ctx.fillStyle = red ? 'rgba(211,66,75,0.16)' : 'rgba(32,37,43,0.14)'; ctx.fillRect(x, y, width, height);
+    ctx.strokeStyle = red ? 'rgba(211,66,75,0.35)' : 'rgba(32,37,43,0.35)'; ctx.lineWidth = 2;
+    for (let i = -height; i < width + height; i += 14) { ctx.beginPath(); ctx.moveTo(x + i, y); ctx.lineTo(x + i + height, y + height); ctx.stroke(); }
+    ctx.fillStyle = red ? '#bd3946' : '#343b43'; ctx.font = `700 ${Math.max(20, Math.floor(height * 0.28))}px "Microsoft YaHei", sans-serif`; ctx.textAlign = 'center'; ctx.fillText('钓鱼牌', x + width / 2, y + height * 0.57, width - 10); ctx.textAlign = 'left';
+  } else {
+    const compact = height < 58 || width < 30;
+    // 小手牌/得分牌采用按宽度约束的字号，避免中文主字压住点数或边框。
+    if (!compact) { ctx.fillStyle = fishingCardColor(c); ctx.font = `700 ${Math.max(12, Math.floor(Math.min(width * 0.16, height * 0.18)))}px "Microsoft YaHei", sans-serif`; ctx.fillText(red ? '红' : '黑', x + 8, y + 20); }
+    ctx.fillStyle = red ? '#a7192a' : '#252b32'; const mainSize = Math.max(11, Math.floor(Math.min(width * 0.72, height * (compact ? 0.43 : 0.44)))); ctx.font = `900 ${mainSize}px "Microsoft YaHei", sans-serif`; ctx.textAlign = 'center'; ctx.fillText(c.name || '？', x + width / 2, y + height * (compact ? 0.67 : 0.64), Math.max(8, width - 6));
+    if (!compact || height >= 30) { ctx.fillStyle = '#67716e'; ctx.font = `700 ${Math.max(9, Math.floor(Math.min(width * 0.30, height * 0.14)))}px "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`; ctx.fillText(c.point ? `${c.point}点` : '', x + width / 2, y + height - (compact ? 5 : 11), Math.max(8, width - 4)); }
+    ctx.textAlign = 'left';
+  }
+  ctx.restore();
+}
+
+function drawFishingCardPlayer(ctx, player, x, y, width, height, isViewer) {
+  // 玩家面板始终以左上角为文字锚点；中央牌池会使用居中对齐，不能把状态泄漏到这里。
+  ctx.save(); ctx.textAlign = 'left';
+  const active = Boolean(player && player.isTurn);
+  roundedRect(ctx, x, y, width, height, 10); ctx.fillStyle = active ? 'rgba(240,189,76,0.18)' : 'rgba(7,19,21,0.86)'; ctx.fill();
+  ctx.strokeStyle = active ? '#f0bd4c' : 'rgba(130,213,208,0.40)'; ctx.lineWidth = active ? 3 : 1.5; ctx.stroke();
+  ctx.fillStyle = active ? '#f0bd4c' : '#e7eeea'; ctx.font = '700 17px "Microsoft YaHei", sans-serif'; ctx.fillText(`${player.name || '玩家'}${player.isBot ? ' · AI' : ''}${player.isGuest ? ' · 游客' : ''}`, x + 12, y + 25, width - 60);
+  if (player.rank) { ctx.fillStyle = '#f0bd4c'; ctx.font = '700 12px Arial'; ctx.textAlign = 'right'; ctx.fillText(`#${player.rank}`, x + width - 12, y + 22); ctx.textAlign = 'left'; }
+  ctx.fillStyle = '#c6d0cd'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(`本局 ${Math.floor(player.roundScore || 0)} · 总分 ${Math.floor(player.score || 0)} · 吃 ${player.eatenCount || 0}`, x + 12, y + 47, width - 24);
+  const hand = Array.isArray(player.hand) ? player.hand.slice(0, 8) : []; const cardW = Math.min(34, Math.max(24, (width - 26) / Math.max(1, Math.min(8, hand.length)) - 4));
+  const cardH = width < 280 ? 54 : 62; const start = x + 12; hand.forEach((card, i) => drawFishingCardFace(ctx, card, start + i * (cardW + 3), y + 60, cardW, cardH, isViewer || !card.hidden));
+  if (!hand.length) { ctx.fillStyle = '#71807b'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText(`手牌 ${player.handCount || 0} 张`, x + 14, y + 88); }
+  const eaten = Array.isArray(player.eaten) ? player.eaten : [];
+  if (eaten.length) {
+    const compactScore = width < 280; const miniW = compactScore ? 24 : 22; const miniH = compactScore ? 20 : 29;
+    const maxFullCards = Math.max(1, Math.floor((width - 26) / (miniW + 2)));
+    // 优先逐张显示完整牌面；若全部得分牌放不下，只显示红牌（每张红牌必有对应黑牌）。
+    let shown = eaten.slice(); let simplified = false;
+    if (shown.length > maxFullCards) { const redCards = shown.filter((card) => card && card.color !== 'black'); if (redCards.length) { shown = redCards; simplified = true; } }
+    // 窄面板固定五列两行；宽面板最多十列，确保20张牌也不会挤到行动文字。
+    const maxCols = compactScore ? 5 : 10; const maxDisplay = compactScore ? 10 : Math.max(maxFullCards, 20); if (shown.length > maxDisplay) shown = shown.slice(0, maxDisplay);
+    const scoreTitleY = y + (compactScore ? 106 : 116); ctx.fillStyle = '#f0bd4c'; ctx.font = '11px "Microsoft YaHei", sans-serif'; ctx.fillText(`得分区（${eaten.length}张${simplified ? ` · 显示红牌${shown.length}张` : ' · 完整牌面'}）`, x + 12, scoreTitleY, width - 24);
+    const scoreY = y + (compactScore ? 110 : 121); shown.forEach((card, i) => { const col = i % maxCols; const row = Math.floor(i / maxCols); drawFishingCardFace(ctx, card, x + 12 + col * (miniW + 2), scoreY + row * (miniH + 2), miniW, miniH, true); });
+    if (simplified && eaten.length > shown.length) { ctx.fillStyle = '#c6d0cd'; ctx.font = '10px "Microsoft YaHei", sans-serif'; ctx.fillText(`黑牌对应${Math.max(0, eaten.length - shown.length)}张`, x + width - 76, y + (compactScore ? 157 : 151), 64); }
+  }
+  ctx.fillStyle = '#9eafaa'; ctx.font = '11px "Microsoft YaHei", sans-serif'; ctx.fillText(player.lastAction || '等待行动', x + 12, y + height - 10, width - 24);
+  ctx.restore();
+}
+
+function drawFishingCardMenu(ctx, view) {
+  const table = view.fishingCardTable; drawSceneHeader(ctx, view, '#d3424b');
+  roundedRect(ctx, 62, 116, 1076, 705, 14); ctx.fillStyle = 'rgba(22,23,28,0.91)'; ctx.fill(); ctx.strokeStyle = 'rgba(211,66,75,0.60)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.textAlign = 'center'; ctx.fillStyle = '#f2c56b'; ctx.font = '800 34px "Microsoft YaHei", sans-serif'; ctx.fillText('钓鱼牌 · 福建红黑牌', 600, 172);
+  ctx.fillStyle = '#d3d9d5'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.fillText('56张牌 · 逆时针行动 · 香牌结算 · 同字异色吃牌', 600, 205);
+  const modes = [['单局赛', '1局 · 入场100'], ['短时赛', '3局 · 累计得分'], ['中时赛', '6局 · 累计得分'], ['长时赛', '12局 · 累计得分']];
+  modes.forEach((m, i) => { const x = 96 + (i % 2) * 510; const y = 247 + Math.floor(i / 2) * 108; roundedRect(ctx, x, y, 470, 82, 9); ctx.fillStyle = i === 0 ? 'rgba(211,66,75,0.17)' : 'rgba(255,255,255,0.055)'; ctx.fill(); ctx.strokeStyle = i === 0 ? '#d3424b' : 'rgba(255,255,255,0.15)'; ctx.lineWidth = 1; ctx.stroke(); ctx.textAlign = 'left'; ctx.fillStyle = '#f3c969'; ctx.font = '700 21px "Microsoft YaHei", sans-serif'; ctx.fillText(m[0], x + 26, y + 33, 180); ctx.fillStyle = '#d7dfdb'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(m[1], x + 220, y + 33, 220); });
+  const rules = ['每回合：出牌吃牌或弃牌 → 摸牌堆底抽一张', '手牌与公共牌必须同字不同色；红牌同点优先', '摸到“香”牌并完成结算后结束本局', '帅仕相/将士相200分 · 伡㐷炮/车马包100分 · 兵卒对100分'];
+  roundedRect(ctx, 96, 484, 1008, 166, 9); ctx.fillStyle = 'rgba(255,255,255,0.045)'; ctx.fill(); ctx.textAlign = 'left'; ctx.fillStyle = '#82d5d0'; ctx.font = '700 18px "Microsoft YaHei", sans-serif'; ctx.fillText('快速规则', 122, 518, 150); ctx.fillStyle = '#d7dfdb'; ctx.font = '15px "Microsoft YaHei", sans-serif'; rules.forEach((line, i) => ctx.fillText(`· ${line}`, 122, 548 + i * 25, 930));
+  ctx.fillStyle = '#f0bd4c'; ctx.font = '700 16px "Microsoft YaHei", sans-serif'; ctx.fillText((table.help && table.help[0]) || '.钓鱼牌 人机 / 开房 · 选择模式后开始', 600, 705, 980);
+  ctx.fillStyle = '#b9c6c1'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(view.quote || '支持 PvE、PvP、PvPvE；多人余额不足可作为游客入场。', 600, 772, 980); ctx.textAlign = 'left';
+}
+
+function drawFishingCardTutorial(ctx, view) {
+  drawSceneHeader(ctx, view, '#d3424b');
+  roundedRect(ctx, 54, 112, 1092, 716, 14); ctx.fillStyle = 'rgba(16,24,24,0.94)'; ctx.fill(); ctx.strokeStyle = 'rgba(211,66,75,0.72)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.textAlign = 'center'; ctx.fillStyle = '#f2c56b'; ctx.font = '800 30px "Microsoft YaHei", sans-serif'; ctx.fillText('钓鱼牌 · 完整流程与操作教程', 600, 158);
+  ctx.fillStyle = '#b9c6c1'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText('福建红黑56张象棋牌｜同字异色吃牌｜逆时针行动｜第二次翻牌必须手动摸牌', 600, 187, 1030); ctx.textAlign = 'left';
+  const lines = Array.isArray(view.lines) ? view.lines.filter(Boolean) : [];
+  const cards = [
+    { title: '① 分牌仪式', color: '#d3424b', text: lines[1] || '56张洗混后分为10份五张牌堆与一份六张牌堆；抽牌决定分牌玩家。' },
+    { title: '② 选堆与定头家', color: '#f0bd4c', text: lines[2] || '分牌玩家选择四堆组成摸牌堆，排列剩余六堆，亮出至少四张计算点数确定头家。' },
+    { title: '③ 每回合第一步', color: '#82d5d0', text: lines[3] || '当前玩家从手牌选择一张：能与公共牌同字异色则吃牌，否则出牌/弃牌放入公共牌池。' },
+    { title: '④ 每回合第二步', color: '#82d5d0', text: '发送“摸牌”才会进行第二次翻牌：从摸牌堆底抽一张，能配对就吃牌，否则放入公共牌池；随后逆时针轮到下一位。' },
+    { title: '⑤ 计分与结束', color: '#f0bd4c', text: '摸到香牌后结算；帅仕相/将士相200分，车马炮/伡㐷炮100分，兵卒对100分，普通对子20分。' }
+  ];
+  cards.forEach((card, index) => {
+    const col = index % 2; const row = Math.floor(index / 2); const x = 88 + col * 524; const y = 220 + row * 128; const w = 484;
+    roundedRect(ctx, x, y, w, 108, 10); ctx.fillStyle = 'rgba(255,255,255,0.055)'; ctx.fill(); ctx.strokeStyle = `${card.color}88`; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = card.color; ctx.font = '700 17px "Microsoft YaHei", sans-serif'; ctx.fillText(card.title, x + 16, y + 27, w - 32);
+    ctx.fillStyle = '#e3e9e5'; ctx.font = '14px "Microsoft YaHei", sans-serif'; wrapLine(ctx, card.text, w - 32).slice(0, 3).forEach((line, i) => ctx.fillText(line, x + 16, y + 53 + i * 19, w - 32));
+  });
+  const commandY = 620; roundedRect(ctx, 88, commandY, 1024, 132, 10); ctx.fillStyle = 'rgba(211,66,75,0.10)'; ctx.fill(); ctx.strokeStyle = 'rgba(211,66,75,0.48)'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#d3424b'; ctx.font = '700 17px "Microsoft YaHei", sans-serif'; ctx.fillText('常用指令', 108, commandY + 29);
+  ctx.fillStyle = '#f3f1e9'; ctx.font = '14px "Microsoft YaHei", sans-serif';
+  ['.钓鱼牌 人机［短时/中时/长时］　·　.钓鱼牌 开房 → 加入 → 开始', '.钓鱼牌 吃牌 1　·　.钓鱼牌 弃牌 2　·　.钓鱼牌 摸牌（必须手动）　·　.钓鱼牌 手牌', '.钓鱼牌 抽牌（分牌阶段）　·　.钓鱼牌 分牌 1,3,5,7 1,2,3,4,5,6'].forEach((line, i) => ctx.fillText(line, 108, commandY + 56 + i * 21, 980));
+  ctx.fillStyle = '#b9c6c1'; ctx.textAlign = 'center'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(view.quote || 'PvE会自动完成分牌，但每一步都会记录在牌桌日志中。', 600, 793, 980); ctx.textAlign = 'left';
+}
+
+function drawFishingCardTable(ctx, view) {
+  const table = view.fishingCardTable;
+  if (table.status === 'menu' && table.mode === 'tutorial') { drawFishingCardTutorial(ctx, view); return; }
+  if (table.status === 'menu') { drawFishingCardMenu(ctx, view); return; }
+  drawSceneHeader(ctx, view, '#d3424b');
+  // 深色牌桌，中央为公共牌区，四角为玩家面板。
+  roundedRect(ctx, 48, 112, 1104, 714, 18); ctx.fillStyle = 'rgba(27,54,42,0.95)'; ctx.fill(); ctx.strokeStyle = '#704b32'; ctx.lineWidth = 14; ctx.stroke();
+  roundedRect(ctx, 72, 136, 1056, 666, 14); ctx.fillStyle = 'rgba(23,76,58,0.90)'; ctx.fill(); ctx.strokeStyle = 'rgba(130,213,208,0.24)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#f2c56b'; ctx.font = '700 22px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`第${table.round || 1}/${table.maxRounds || 1}局 · ${table.phase || (table.status === 'finished' ? '结算' : '行动中')}`, 600, 170);
+  ctx.fillStyle = '#c8d2ce'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(`摸牌堆 ${table.deckCount || table.drawPileCount || 0} 张 · 当前：${table.currentName || '—'}`, 600, 195);
+  // 公共牌池
+  roundedRect(ctx, 328, 242, 544, 270, 14); ctx.fillStyle = 'rgba(6,24,19,0.72)'; ctx.fill(); ctx.strokeStyle = 'rgba(240,189,76,0.55)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#b7cbc3'; ctx.font = '700 15px "Microsoft YaHei", sans-serif'; ctx.fillText('公共牌池', 600, 270);
+  const board = (table.publicCards || table.board || []).slice(0, 16); const boardW = 48; const boardH = 82; const boardGap = 6; const boardPerRow = 8;
+  board.forEach((card, i) => { const row = Math.floor(i / boardPerRow); const col = i % boardPerRow; const rowCount = Math.min(boardPerRow, board.length - row * boardPerRow); const total = rowCount * boardW + (rowCount - 1) * boardGap; const sx = 600 - total / 2; drawFishingCardFace(ctx, card, sx + col * (boardW + boardGap), 286 + row * 108, boardW, boardH, true); });
+  if (!board.length) { ctx.fillStyle = '#789087'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText('等待发牌', 600, 380); }
+  if (table.scent) { ctx.fillStyle = '#ef8d7f'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText(`香牌：${table.scent.name || '未知'}（${table.scent.color === 'black' ? '黑' : '红'}）`, 600, 492); }
+  // 分牌仪式面板：小牌堆、亮抽牌、已选堆与头家均可见。
+  if (table.status === 'dealing' && table.deal) {
+    roundedRect(ctx, 150, 214, 900, 430, 12); ctx.fillStyle = 'rgba(8,18,14,0.94)'; ctx.fill(); ctx.strokeStyle = '#d3424b'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#f0bd4c'; ctx.font = '800 22px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText('分牌仪式 · 先完成抽牌与选堆，再开始行动', 600, 250);
+    const piles = table.deal.piles || []; const selected = table.deal.selected || [];
+    piles.forEach((pile, i) => { const col = i % 5; const row = Math.floor(i / 5); const x = 190 + col * 165; const y = 274 + row * 128; roundedRect(ctx, x, y, 132, 92, 8); ctx.fillStyle = selected.indexOf(i) >= 0 ? 'rgba(211,66,75,0.35)' : 'rgba(255,255,255,0.08)'; ctx.fill(); ctx.strokeStyle = selected.indexOf(i) >= 0 ? '#ef8d7f' : 'rgba(255,255,255,0.20)'; ctx.lineWidth = 2; ctx.stroke(); const top = pile.cards && pile.cards[0]; if (top) drawFishingCardFace(ctx, top, x + 8, y + 8, 45, 72, true); ctx.fillStyle = '#e7eeea'; ctx.font = '700 15px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'left'; ctx.fillText(`第${i + 1}堆`, x + 60, y + 30); ctx.fillStyle = '#a9b8b2'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText(`${pile.count || 5}张${selected.indexOf(i) >= 0 ? ' · 已选' : ''}`, x + 60, y + 54); });
+    ctx.fillStyle = '#c8d2ce'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; const draws = table.deal.dealerDraws || []; ctx.fillText(`抽牌：${draws.length ? draws.map((c) => `${c.name || c.text}(${c.point}点)`).join('、') : '等待抽牌'}　|　亮牌：${(table.deal.revealed || []).map((c) => c.name || c.text).join('、') || '等待亮牌'}`, 600, 560, 820); ctx.fillStyle = '#82d5d0'; ctx.fillText(`分牌玩家：${table.deal.distributor >= 0 && table.players[table.deal.distributor] ? table.players[table.deal.distributor].name : '待定'}　头家：${table.deal.head >= 0 && table.players[table.deal.head] ? table.players[table.deal.head].name : '待定'}`, 600, 588); ctx.fillStyle = '#f3c969'; ctx.fillText((table.deal.logs || []).slice(-1)[0] || '发送：.钓鱼牌 分牌 1,3,5,7 1,2,3,4,5,6', 600, 620, 820); ctx.textAlign = 'left';
+  }
+  const players = table.players || [];
+  // 四人桌采用左右窄边栏，中央完整留给公共牌；底部留出独立日志栏，避免文字与牌面重叠。
+  const positions = players.length >= 4 ? [[84, 202], [84, 566], [866, 566], [866, 202]] : [[92, 220], [784, 220], [438, 570]];
+  // 分牌仪式时中央面板优先，参与者只显示在底部一行，避免覆盖牌堆信息。
+  if (table.status === 'dealing') {
+    ctx.fillStyle = '#c8d2ce'; ctx.font = '700 14px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`参与者：${players.map((p) => p.name || '玩家').join('　')}`, 600, 680, 900); ctx.textAlign = 'left';
+  } else players.forEach((player, i) => drawFishingCardPlayer(ctx, player, positions[i][0], positions[i][1], players.length >= 4 ? 250 : 324, players.length >= 4 ? 166 : 170, i === 0));
+  if (table.result || table.status === 'finished') {
+    roundedRect(ctx, 300, 500, 600, 106, 10); ctx.fillStyle = 'rgba(8,18,14,0.94)'; ctx.fill(); ctx.strokeStyle = '#f0bd4c'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#f0bd4c'; ctx.font = '800 22px "Microsoft YaHei", sans-serif'; ctx.fillText(table.result ? `胜者：${table.result.winnerName || '—'}` : '本局结算', 600, 535);
+    ctx.fillStyle = '#e8eeeb'; ctx.font = '15px "Microsoft YaHei", sans-serif'; const resultLine = table.result ? `${table.result.reason || ''} · ${Math.floor(table.result.score || 0)}分 · 奖励 ${Math.floor(table.result.reward || 0)}币` : '所有玩家的牌局已经结束'; ctx.fillText(resultLine, 600, 564, 540); if (table.result && table.result.affectionDelta != null) { ctx.fillStyle = table.result.affectionDelta >= 0 ? '#82d5d0' : '#ef8d7f'; ctx.fillText(`好感 ${table.result.affectionDelta >= 0 ? '+' : ''}${Math.floor(table.result.affectionDelta)}`, 600, 588); }
+  }
+  const recentLogs = (table.logs || []).slice(-3);
+  roundedRect(ctx, 82, 748, 1036, recentLogs.length > 1 ? 62 : 38, 7); ctx.fillStyle = 'rgba(4,14,11,0.90)'; ctx.fill(); ctx.fillStyle = '#cbd5d1'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center';
+  if (recentLogs.length) recentLogs.forEach((line, i) => ctx.fillText(line, 600, 766 + i * 15, 980)); else ctx.fillText(table.quote || '出牌 1 · 吃牌 2 · 弃牌 3 · 摸牌', 600, 770, 980);
+  ctx.textAlign = 'left';
 }
 
 function categoryColor(category) {
@@ -2093,7 +3035,7 @@ function drawRelationProgress(ctx, x, y, width, relation, affection, progress, c
 }
 
 function drawDailyScene(ctx, view) {
-  const scene = view.dailyScene; const accent = '#f3c969'; const claimed = scene.status === 'claimed';
+  const scene = view.dailyScene; const tierColors = { basic: '#f3c969', better: '#82d5d0', best: '#d9a7ff' }; const accent = tierColors[scene.tier] || tierColors.basic; const claimed = scene.status === 'claimed';
   drawSceneHeader(ctx, view, accent);
   roundedRect(ctx, 72, 126, 340, 456, 8); ctx.fillStyle = 'rgba(12,18,20,0.91)'; ctx.fill();
   ctx.strokeStyle = 'rgba(243,201,105,0.58)'; ctx.lineWidth = 2; ctx.stroke();
@@ -2110,7 +3052,7 @@ function drawDailyScene(ctx, view) {
 
   roundedRect(ctx, 442, 126, 686, 456, 8); ctx.fillStyle = 'rgba(12,18,20,0.91)'; ctx.fill();
   ctx.fillStyle = '#f5f0e5'; ctx.font = '700 30px "Microsoft YaHei", sans-serif'; ctx.fillText(`${scene.name} 的今日补给`, 480, 179, 600);
-  ctx.fillStyle = '#bfc9c6'; ctx.font = '17px "Microsoft YaHei", sans-serif'; ctx.fillText(claimed ? '签到奖励已经写入专属档案' : '奖励已经领取，本日不可重复获得', 480, 210, 600);
+  ctx.fillStyle = accent; ctx.font = '700 17px "Microsoft YaHei", sans-serif'; ctx.fillText(`${scene.tierName} · ${claimed ? '签到奖励已经写入专属档案' : '奖励已经领取，本日不可重复获得'}`, 480, 210, 600);
 
   roundedRect(ctx, 480, 246, 282, 138, 7); ctx.fillStyle = 'rgba(243,201,105,0.10)'; ctx.fill();
   drawCoinIcon(ctx, 533, 315, 62); ctx.fillStyle = '#f3c969'; ctx.font = '700 40px "Microsoft YaHei", sans-serif'; ctx.fillText(`+${Math.floor(scene.coinsReward)}`, 584, 312, 145);
@@ -2567,19 +3509,393 @@ function drawAuctionScene(ctx, view) {
   else drawAuctionCollection(ctx, view);
 }
 
+function tombRarityColor(rarity) {
+  if (rarity === '传世') return '#efc35c';
+  if (rarity === '珍奇') return '#c795f5';
+  if (rarity === '稀有') return '#67c8df';
+  if (rarity === '诅咒') return '#ec7184';
+  if (rarity === '机关') return '#e49c58';
+  if (rarity === '残旧') return '#929b91';
+  return '#c9b995';
+}
+
+function drawTombIcon(ctx, type, centerX, centerY, size, color) {
+  const radius = size / 2; ctx.save(); ctx.translate(centerX, centerY); ctx.strokeStyle = color; ctx.fillStyle = `${color}30`; ctx.lineWidth = Math.max(2, size * 0.055); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  if (type === 'gem' || type === 'eye') {
+    ctx.beginPath(); ctx.moveTo(0, -radius * 0.78); ctx.lineTo(radius * 0.7, -radius * 0.1); ctx.lineTo(radius * 0.38, radius * 0.72); ctx.lineTo(-radius * 0.38, radius * 0.72); ctx.lineTo(-radius * 0.7, -radius * 0.1); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-radius * 0.7, -radius * 0.1); ctx.lineTo(radius * 0.7, -radius * 0.1); ctx.moveTo(0, -radius * 0.78); ctx.lineTo(-radius * 0.38, radius * 0.72); ctx.moveTo(0, -radius * 0.78); ctx.lineTo(radius * 0.38, radius * 0.72); ctx.stroke();
+  } else if (type === 'crown') {
+    ctx.beginPath(); ctx.moveTo(-radius * 0.72, radius * 0.48); ctx.lineTo(-radius * 0.62, -radius * 0.48); ctx.lineTo(-radius * 0.18, -radius * 0.08); ctx.lineTo(0, -radius * 0.7); ctx.lineTo(radius * 0.22, -radius * 0.08); ctx.lineTo(radius * 0.68, -radius * 0.48); ctx.lineTo(radius * 0.72, radius * 0.48); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-radius * 0.7, radius * 0.18); ctx.lineTo(radius * 0.7, radius * 0.18); ctx.stroke();
+  } else if (type === 'scarab') {
+    ctx.beginPath(); ctx.ellipse(0, radius * 0.05, radius * 0.38, radius * 0.58, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.beginPath(); ctx.moveTo(0, -radius * 0.52); ctx.lineTo(0, radius * 0.62); ctx.moveTo(-radius * 0.35, -radius * 0.26); ctx.lineTo(-radius * 0.72, -radius * 0.55); ctx.moveTo(radius * 0.35, -radius * 0.26); ctx.lineTo(radius * 0.72, -radius * 0.55); ctx.moveTo(-radius * 0.38, radius * 0.05); ctx.lineTo(-radius * 0.78, radius * 0.12); ctx.moveTo(radius * 0.38, radius * 0.05); ctx.lineTo(radius * 0.78, radius * 0.12); ctx.moveTo(-radius * 0.32, radius * 0.35); ctx.lineTo(-radius * 0.62, radius * 0.65); ctx.moveTo(radius * 0.32, radius * 0.35); ctx.lineTo(radius * 0.62, radius * 0.65); ctx.stroke();
+  } else if (type === 'coffin') {
+    ctx.beginPath(); ctx.moveTo(-radius * 0.42, -radius * 0.72); ctx.lineTo(radius * 0.42, -radius * 0.72); ctx.lineTo(radius * 0.65, -radius * 0.28); ctx.lineTo(radius * 0.45, radius * 0.72); ctx.lineTo(-radius * 0.45, radius * 0.72); ctx.lineTo(-radius * 0.65, -radius * 0.28); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.beginPath(); ctx.arc(0, -radius * 0.28, radius * 0.14, 0, Math.PI * 2); ctx.moveTo(0, -radius * 0.12); ctx.lineTo(0, radius * 0.45); ctx.stroke();
+  } else if (type === 'scroll' || type === 'book' || type === 'tablet') {
+    roundedRect(ctx, -radius * 0.62, -radius * 0.72, radius * 1.24, radius * 1.44, radius * 0.12); ctx.fill(); ctx.stroke(); ctx.beginPath(); ctx.moveTo(-radius * 0.38, -radius * 0.3); ctx.lineTo(radius * 0.38, -radius * 0.3); ctx.moveTo(-radius * 0.38, 0); ctx.lineTo(radius * 0.3, 0); ctx.moveTo(-radius * 0.38, radius * 0.3); ctx.lineTo(radius * 0.38, radius * 0.3); ctx.stroke();
+  } else if (type === 'jar' || type === 'lamp') {
+    ctx.beginPath(); ctx.moveTo(-radius * 0.25, -radius * 0.72); ctx.lineTo(radius * 0.25, -radius * 0.72); ctx.lineTo(radius * 0.2, -radius * 0.38); ctx.bezierCurveTo(radius * 0.72, -radius * 0.12, radius * 0.62, radius * 0.62, 0, radius * 0.72); ctx.bezierCurveTo(-radius * 0.62, radius * 0.62, -radius * 0.72, -radius * 0.12, -radius * 0.2, -radius * 0.38); ctx.closePath(); ctx.fill(); ctx.stroke();
+  } else if (type === 'ankh') {
+    ctx.beginPath(); ctx.ellipse(0, -radius * 0.38, radius * 0.26, radius * 0.32, 0, 0, Math.PI * 2); ctx.moveTo(0, -radius * 0.05); ctx.lineTo(0, radius * 0.72); ctx.moveTo(-radius * 0.48, radius * 0.18); ctx.lineTo(radius * 0.48, radius * 0.18); ctx.stroke();
+  } else if (type === 'compass') {
+    ctx.beginPath(); ctx.arc(0, 0, radius * 0.66, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, -radius * 0.86); ctx.lineTo(0, -radius * 0.62); ctx.moveTo(0, radius * 0.62); ctx.lineTo(0, radius * 0.86); ctx.moveTo(-radius * 0.86, 0); ctx.lineTo(-radius * 0.62, 0); ctx.moveTo(radius * 0.62, 0); ctx.lineTo(radius * 0.86, 0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(radius * 0.34, -radius * 0.46); ctx.lineTo(radius * 0.08, radius * 0.08); ctx.lineTo(-radius * 0.34, radius * 0.46); ctx.lineTo(-radius * 0.08, -radius * 0.08); ctx.closePath(); ctx.fillStyle = color; ctx.fill(); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(0, 0, radius * 0.68, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.beginPath(); ctx.moveTo(-radius * 0.35, 0); ctx.lineTo(radius * 0.35, 0); ctx.moveTo(0, -radius * 0.35); ctx.lineTo(0, radius * 0.35); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawTombTreasure(ctx, item, x, y, width, height) {
+  const claimed = Boolean(item.claimedByName); ctx.save(); if (claimed) ctx.globalAlpha = 0.42;
+  const color = tombRarityColor(item.rarity); roundedRect(ctx, x, y, width, height, 12); ctx.fillStyle = 'rgba(21,16,12,0.93)'; ctx.fill(); ctx.strokeStyle = `${color}bb`; ctx.lineWidth = 2; ctx.stroke();
+  roundedRect(ctx, x + 12, y + 12, 35, 28, 8); ctx.fillStyle = color; ctx.fill(); ctx.fillStyle = '#241b12'; ctx.font = '800 16px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(String(item.slot), x + 29.5, y + 32); ctx.textAlign = 'left';
+  ctx.fillStyle = color; ctx.font = '700 13px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'right'; ctx.fillText(item.rarity, x + width - 14, y + 31); ctx.textAlign = 'left';
+  drawTombIcon(ctx, item.icon, x + width / 2, y + 82, 58, color);
+  ctx.fillStyle = '#f4e9d2'; ctx.font = '700 16px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(item.name, x + width / 2, y + 130, width - 20); ctx.textAlign = 'left';
+  if (item.effectText) {
+    ctx.fillStyle = '#d7bd83'; ctx.font = '700 12px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center';
+    wrapLine(ctx, item.effectText, width - 28).slice(0, 2).forEach((line, index) => ctx.fillText(line, x + width / 2, y + 160 + index * 18)); ctx.textAlign = 'left';
+  }
+  const stats = [['重', item.weight, '#caa173'], ['法', item.magic, '#9bbfea'], ['虫', item.scarabs, '#9bd176'], ['值', item.value, '#efc35c']];
+  stats.forEach((stat, index) => { const cellWidth = (width - 20) / 4; const cellX = x + 10 + index * cellWidth; roundedRect(ctx, cellX + 2, y + height - 48, cellWidth - 4, 34, 7); ctx.fillStyle = `${stat[2]}18`; ctx.fill(); ctx.fillStyle = stat[2]; ctx.font = '700 13px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`${stat[0]}${stat[1] >= 0 && index === 2 && stat[1] > 0 ? '+' : ''}${stat[1]}`, cellX + cellWidth / 2, y + height - 25); }); ctx.textAlign = 'left';
+  ctx.restore();
+  if (claimed) {
+    ctx.save(); roundedRect(ctx, x + 3, y + 3, width - 6, height - 6, 10); ctx.clip();
+    const curtain = ctx.createLinearGradient(x, y, x + width, y); curtain.addColorStop(0, 'rgba(0,0,0,0.9)'); curtain.addColorStop(0.18, 'rgba(30,30,30,0.78)'); curtain.addColorStop(0.38, 'rgba(0,0,0,0.92)'); curtain.addColorStop(0.62, 'rgba(28,28,28,0.8)'); curtain.addColorStop(0.82, 'rgba(0,0,0,0.94)'); curtain.addColorStop(1, 'rgba(18,18,18,0.9)');
+    const curtainHeight = height - 58;
+    ctx.fillStyle = curtain; ctx.fillRect(x, y, width, curtainHeight);
+    ctx.fillStyle = 'rgba(0,0,0,0.95)'; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + width, y); ctx.lineTo(x + width, y + 34); ctx.quadraticCurveTo(x + width * 0.75, y + 50, x + width * 0.5, y + 32); ctx.quadraticCurveTo(x + width * 0.25, y + 50, x, y + 34); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(215,168,79,0.62)'; ctx.lineWidth = 1.5; ctx.strokeRect(x + 12, y + height / 2 - 40, width - 24, 80);
+    ctx.fillStyle = '#d8c8aa'; ctx.font = '800 15px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`第${item.claimedOrder || 1}顺位已取走`, x + width / 2, y + height / 2 - 10, width - 30);
+    ctx.fillStyle = '#efc35c'; ctx.font = '800 18px "Microsoft YaHei", sans-serif'; ctx.fillText(item.claimedByName, x + width / 2, y + height / 2 + 20, width - 30); ctx.textAlign = 'left'; ctx.restore();
+    ctx.save();
+    ctx.fillStyle = 'rgba(10,9,8,0.96)'; ctx.fillRect(x + 4, y + height - 58, width - 8, 54);
+    ctx.strokeStyle = `${color}88`; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x + 8, y + height - 58); ctx.lineTo(x + width - 8, y + height - 58); ctx.stroke();
+    stats.forEach((stat, index) => { const cellWidth = (width - 20) / 4; const cellX = x + 10 + index * cellWidth; roundedRect(ctx, cellX + 2, y + height - 48, cellWidth - 4, 34, 7); ctx.fillStyle = `${stat[2]}24`; ctx.fill(); ctx.fillStyle = stat[2]; ctx.font = '800 13px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`${stat[0]}${stat[1] >= 0 && index === 2 && stat[1] > 0 ? '+' : ''}${stat[1]}`, cellX + cellWidth / 2, y + height - 25); });
+    ctx.textAlign = 'left'; ctx.restore();
+  }
+}
+
+function drawTombPlayer(ctx, player, x, y, width, height) {
+  const accent = player.isTurn ? '#efc35c' : player.status.includes('淘汰') ? '#df7180' : '#a98f61'; roundedRect(ctx, x, y, width, height, 10); ctx.fillStyle = 'rgba(14,13,12,0.9)'; ctx.fill(); ctx.strokeStyle = `${accent}99`; ctx.lineWidth = player.isTurn ? 3 : 1; ctx.stroke();
+  ctx.fillStyle = accent; ctx.font = '700 18px "Microsoft YaHei", sans-serif'; ctx.fillText(player.name, x + 18, y + 30, width - 100);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#b9aea0'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(`${player.isBot ? '摸金客' : player.isGuest ? '游客' : '玩家'} · ${player.status}`, x + width - 16, y + 29, width - 110); ctx.textAlign = 'left';
+  const stats = [['重量', player.weight, '#caa173'], ['法力', player.magic, '#9bbfea'], ['圣甲虫', player.scarabs, '#9bd176'], ['价值', player.value, '#efc35c']];
+  stats.forEach((stat, index) => { const cellWidth = (width - 30) / 4; const cellX = x + 15 + index * cellWidth; ctx.fillStyle = '#908779'; ctx.font = '11px "Microsoft YaHei", sans-serif'; ctx.fillText(stat[0], cellX, y + 55); ctx.fillStyle = stat[2]; ctx.font = '800 21px "Microsoft YaHei", sans-serif'; ctx.fillText(String(stat[1]), cellX, y + 80); });
+  roundedRect(ctx, x + 15, y + 92, width - 30, 36, 7); ctx.fillStyle = 'rgba(255,255,255,0.055)'; ctx.fill();
+  ctx.fillStyle = '#aaa294'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText(`累计带出 ${player.extractedValue} · 生还 ${player.survivals}墓${player.setBonus ? ` · 日月合璧+${player.setBonus}` : ''}`, x + 27, y + 115, width - 48);
+}
+
+function drawTombMenu(ctx, view) {
+  const scene = view.tombScene; drawSceneHeader(ctx, view, '#d7a84f');
+  roundedRect(ctx, 54, 126, 1092, 650, 18); ctx.fillStyle = 'rgba(20,14,10,0.86)'; ctx.fill(); ctx.strokeStyle = 'rgba(215,168,79,0.48)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#d7a84f'; ctx.font = '800 43px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(scene.mode === 'waiting' ? '摸金队集结中' : '三重诅咒之墓', 600, 210); ctx.textAlign = 'left';
+  drawTombIcon(ctx, 'crown', 600, 322, 118, '#d7a84f');
+  const rules = scene.mode === 'waiting' ? scene.players.map((player, index) => `${index + 1}号席 · ${player.name}`) : ['每墓 8 轮 · 每轮 5 宝 4 取', '重量第一淘汰 · 法力第一淘汰', '法力低于圣甲虫者淘汰', '常规价值回收 · 耐久累计排名'];
+  rules.forEach((line, index) => { const x = 180 + (index % 2) * 470; const y = 438 + Math.floor(index / 2) * 84; roundedRect(ctx, x, y, 410, 58, 10); ctx.fillStyle = 'rgba(215,168,79,0.1)'; ctx.fill(); ctx.fillStyle = index < 2 ? '#f1d28c' : '#c9bdac'; ctx.font = '700 17px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(line, x + 205, y + 36, 382); }); ctx.textAlign = 'left';
+  ctx.fillStyle = '#cbbda8'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(scene.lastAction, 600, 660, 940); ctx.fillStyle = '#82d5d0'; ctx.fillText(scene.help.join('   ·   '), 600, 716, 1020); ctx.textAlign = 'left';
+}
+
+function drawTombDraft(ctx, view) {
+  const scene = view.tombScene; drawSceneHeader(ctx, view, '#d7a84f');
+  roundedRect(ctx, 42, 110, 1116, 312, 14); ctx.fillStyle = 'rgba(18,13,10,0.88)'; ctx.fill(); ctx.strokeStyle = 'rgba(215,168,79,0.48)'; ctx.stroke();
+  const cardCount = Math.min(5, scene.treasures.length || scene.poolSize || 5); const gap = 16; const cardWidth = cardCount === 4 ? 252 : 202; const totalWidth = cardCount * cardWidth + Math.max(0, cardCount - 1) * gap; const startX = (1200 - totalWidth) / 2;
+  scene.treasures.forEach((item, index) => drawTombTreasure(ctx, item, startX + index * (cardWidth + gap), 128, cardWidth, 276));
+  const order = scene.order.map((name, index) => `${index + 1}.${name}`).join('  →  '); ctx.fillStyle = '#d7a84f'; ctx.font = '700 15px "Microsoft YaHei", sans-serif'; ctx.fillText(`本轮候选${cardCount}件 · 顺位  ${order}${scene.swallowed ? `  ·  古墓吞噬：${scene.swallowed.name}` : ''}`, 62, 451, 900);
+  ctx.textAlign = 'right'; ctx.fillStyle = scene.secondsRemaining > 0 ? '#82d5d0' : '#ef8d7f'; ctx.fillText(`${scene.currentName} · ${scene.secondsRemaining}秒`, 1138, 451, 280); ctx.textAlign = 'left';
+  scene.players.forEach((player, index) => drawTombPlayer(ctx, player, 54 + (index % 2) * 554, 480 + Math.floor(index / 2) * 166, 536, 146));
+  roundedRect(ctx, 54, 818, 1092, 46, 10); ctx.fillStyle = 'rgba(12,10,8,0.88)'; ctx.fill(); ctx.fillStyle = '#d9d0c1'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.lastAction, 76, 847, 720); ctx.textAlign = 'right'; ctx.fillStyle = '#82d5d0'; ctx.fillText('.古墓 拿 <序号>', 1124, 847); ctx.textAlign = 'left';
+}
+
+function drawTombSettlement(ctx, view) {
+  const scene = view.tombScene; drawSceneHeader(ctx, view, '#d7a84f');
+  ctx.fillStyle = '#d7a84f'; ctx.font = '800 26px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.mode === 'finished' ? '最终带出总榜' : `第${scene.gameNo}墓 · 三重诅咒`, 58, 137);
+  if (scene.settlement) scene.settlement.stages.forEach((stage, index) => { const colors = ['#c6a06e', '#b890e4', '#93c66d']; const y = 162 + index * 92; roundedRect(ctx, 54, y, 1092, 72, 10); ctx.fillStyle = 'rgba(15,12,10,0.9)'; ctx.fill(); ctx.fillStyle = colors[index]; ctx.fillRect(54, y, 7, 72); ctx.fillStyle = colors[index]; ctx.font = '800 18px "Microsoft YaHei", sans-serif'; ctx.fillText(`${index + 1}  ${stage.name}`, 82, y + 29); ctx.fillStyle = '#c9c0b4'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(stage.detail, 82, y + 54, 1028); });
+  if (scene.mode === 'finished' && scene.ranking.length) {
+    scene.ranking.forEach((row, index) => { const y = 458 + index * 82; const color = index === 0 ? '#efc35c' : index === 1 ? '#aebfd0' : '#9c8468'; roundedRect(ctx, 54, y, 1092, 66, 10); ctx.fillStyle = 'rgba(16,13,11,0.9)'; ctx.fill(); ctx.fillStyle = color; ctx.font = '800 21px "Microsoft YaHei", sans-serif'; ctx.fillText(`#${row.rank}`, 76, y + 40); ctx.fillStyle = '#f3eadb'; ctx.fillText(row.name, 142, y + 40, 270); ctx.fillStyle = '#c8bdad'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(`累计带出 ${row.value} · 生还 ${row.survivals}墓`, 430, y + 39, 380); ctx.textAlign = 'right'; ctx.fillStyle = row.reward ? '#82d5d0' : '#9b9388'; ctx.fillText(row.reward ? `+${row.reward}币  ${row.affectionDelta >= 0 ? '+' : ''}${row.affectionDelta}好感` : '无金币奖励', 1120, y + 39, 300); ctx.textAlign = 'left'; });
+  } else {
+    scene.players.forEach((player, index) => drawTombPlayer(ctx, player, 54 + (index % 2) * 554, 458 + Math.floor(index / 2) * 166, 536, 146));
+  }
+  roundedRect(ctx, 54, 812, 1092, 52, 10); ctx.fillStyle = 'rgba(12,10,8,0.9)'; ctx.fill(); ctx.fillStyle = '#d9d0c1'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.lastAction, 76, 844, 670); ctx.textAlign = 'right'; ctx.fillStyle = '#82d5d0'; ctx.fillText(scene.mode === 'between_games' ? '.古墓 下一墓' : '再次发送 .古墓 返回首页', 1122, 844); ctx.textAlign = 'left';
+}
+
+function drawTombScene(ctx, view) {
+  const mode = view.tombScene.mode;
+  if (mode === 'menu' || mode === 'waiting') drawTombMenu(ctx, view);
+  else if (mode === 'playing') drawTombDraft(ctx, view);
+  else drawTombSettlement(ctx, view);
+}
+
+function bountyTerrainColor(terrain) {
+  return ({ P: '#8c9b6a', F: '#3f6b52', H: '#80664c', W: '#3f8294', G: '#9a8960' })[terrain] || '#596963';
+}
+
+function drawBountyMapMarker(ctx, tile, tx, ty, cell) {
+  if (tile.enemyCount > 0) {
+    const downed = Math.min(tile.enemyCount, Math.max(0, tile.downedEnemyCount || 0)); const standing = tile.enemyCount - downed; const baseX = tx + cell / 2; const cy = ty + cell / 2; const radius = Math.max(7, cell * (standing && downed ? 0.18 : 0.24)); ctx.save();
+    if (standing > 0) { const cx = baseX - (downed ? radius * 0.72 : 0); ctx.fillStyle = 'rgba(52,10,13,0.9)'; ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#ff715f'; ctx.lineWidth = 3; ctx.stroke(); ctx.beginPath(); ctx.moveTo(cx - radius - 4, cy); ctx.lineTo(cx - radius + 1, cy); ctx.moveTo(cx + radius - 1, cy); ctx.lineTo(cx + radius + 4, cy); ctx.moveTo(cx, cy - radius - 4); ctx.lineTo(cx, cy - radius + 1); ctx.moveTo(cx, cy + radius - 1); ctx.lineTo(cx, cy + radius + 4); ctx.stroke(); ctx.fillStyle = '#ffd0c7'; ctx.font = '800 10px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(standing > 1 ? String(standing) : '敌', cx, cy + 4); }
+    if (downed > 0) { const cx = baseX + (standing ? radius * 0.72 : 0); ctx.translate(cx, cy); ctx.rotate(Math.PI / 4); ctx.fillStyle = 'rgba(33,31,34,0.94)'; ctx.fillRect(-radius, -radius, radius * 2, radius * 2); ctx.strokeStyle = '#c5b5ba'; ctx.lineWidth = 3; ctx.strokeRect(-radius, -radius, radius * 2, radius * 2); ctx.rotate(-Math.PI / 4); ctx.fillStyle = '#f0e5e8'; ctx.font = '800 10px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(downed > 1 ? String(downed) : '倒', 0, 4); ctx.translate(-cx, -cy); }
+    ctx.textAlign = 'left'; ctx.restore();
+  }
+  if (tile.marker === 'self') { ctx.fillStyle = '#55e3d0'; ctx.beginPath(); ctx.arc(tx + cell / 2, ty + cell / 2, Math.max(7, cell * 0.25), 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#e2fff4'; ctx.lineWidth = 2; ctx.stroke(); }
+  else if (tile.marker === 'ally') { ctx.fillStyle = '#79b8ff'; ctx.beginPath(); ctx.arc(tx + cell / 2, ty + cell / 2, Math.max(6, cell * 0.2), 0, Math.PI * 2); ctx.fill(); }
+}
+
+function drawBountyMap(ctx, scene, x, y, size, privateView) {
+  const width = Math.max(1, scene.width || 13); const height = Math.max(1, scene.height || 13); const cell = Math.floor(Math.min(size / width, size / height));
+  const mapW = width * cell; const mapH = height * cell;
+  roundedRect(ctx, x - 12, y - 12, mapW + 24, mapH + 24, 12); ctx.fillStyle = 'rgba(5,12,13,0.86)'; ctx.fill(); ctx.strokeStyle = 'rgba(214,177,91,0.65)'; ctx.lineWidth = 2; ctx.stroke();
+  scene.cells.forEach((tile) => {
+    const tx = x + tile.x * cell; const ty = y + tile.y * cell;
+    ctx.fillStyle = bountyTerrainColor(tile.terrain); ctx.globalAlpha = 0.88; ctx.fillRect(tx, ty, cell - 1, cell - 1); ctx.globalAlpha = 1;
+    ctx.strokeStyle = 'rgba(240,245,227,0.22)'; ctx.lineWidth = 1; ctx.strokeRect(tx, ty, cell, cell);
+    if (tile.bossArea) { ctx.fillStyle = 'rgba(142,35,35,0.24)'; ctx.fillRect(tx + 1, ty + 1, cell - 2, cell - 2); }
+    if (tile.exit) { ctx.strokeStyle = '#ffd66e'; ctx.lineWidth = 3; ctx.strokeRect(tx + 4, ty + 4, cell - 8, cell - 8); ctx.fillStyle = '#ffe7a1'; ctx.font = '700 13px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText('撤', tx + cell / 2, ty + cell / 2 + 5); ctx.textAlign = 'left'; }
+    if (tile.clue) { const cx = tx + cell / 2; const cy = ty + cell / 2; ctx.save(); ctx.translate(cx, cy); ctx.rotate(Math.PI / 4); ctx.fillStyle = 'rgba(25,20,12,0.88)'; ctx.fillRect(-11, -11, 22, 22); ctx.strokeStyle = '#ffd66e'; ctx.lineWidth = 3; ctx.strokeRect(-11, -11, 22, 22); ctx.restore(); ctx.fillStyle = '#ffe7a1'; ctx.font = '800 12px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText('线', cx, cy + 4); ctx.textAlign = 'left'; }
+    if (tile.landmark && tile.x % 3 === 0 && tile.y % 3 === 0) { ctx.fillStyle = 'rgba(255,240,185,0.78)'; ctx.font = '10px "Microsoft YaHei", sans-serif'; ctx.fillText(tile.landmark.slice(0, 3), tx + 3, ty + 13, cell - 6); }
+    if (tile.known) { ctx.strokeStyle = 'rgba(255,225,127,0.82)'; ctx.lineWidth = 2; ctx.strokeRect(tx + 2, ty + 2, cell - 5, cell - 5); }
+    if (tile.event) { const cx = tx + cell - 10; const cy = ty + 10; ctx.save(); ctx.translate(cx, cy); ctx.rotate(Math.PI / 4); ctx.fillStyle = tile.event === 'relic' ? '#c89cff' : tile.event === 'nest' || tile.event === 'bell' ? '#ef8d7f' : '#ffd66e'; ctx.fillRect(-8, -8, 16, 16); ctx.restore(); ctx.fillStyle = '#172022'; ctx.font = '800 10px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(tile.eventMarker || '?', cx, cy + 4, 13); ctx.textAlign = 'left'; }
+    if (tile.monster) { const cx = tx + 11; const cy = ty + cell - 11; ctx.beginPath(); ctx.arc(cx, cy, 9, 0, Math.PI * 2); ctx.fillStyle = tile.monster === 'armored' ? '#b9b5a8' : tile.monster === 'waterdevil' ? '#67bed0' : tile.monster === 'hound' ? '#df7180' : '#c48e63'; ctx.fill(); ctx.strokeStyle = '#2b1715'; ctx.lineWidth = 2; ctx.stroke(); ctx.fillStyle = '#211715'; ctx.font = '800 10px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText('怪', cx, cy + 4); ctx.textAlign = 'left'; }
+  });
+  const bossTiles = scene.cells.filter((tile) => tile.bossArea);
+  if (bossTiles.length) {
+    const minX = Math.min(...bossTiles.map((tile) => tile.x)); const maxX = Math.max(...bossTiles.map((tile) => tile.x)); const minY = Math.min(...bossTiles.map((tile) => tile.y)); const maxY = Math.max(...bossTiles.map((tile) => tile.y)); const bx = x + minX * cell; const by = y + minY * cell; const bw = (maxX - minX + 1) * cell; const bh = (maxY - minY + 1) * cell;
+    ctx.save(); ctx.setLineDash([8, 5]); ctx.strokeStyle = '#ff715f'; ctx.lineWidth = 4; ctx.strokeRect(bx + 2, by + 2, bw - 4, bh - 4); ctx.setLineDash([]); roundedRect(ctx, bx + 7, by + 7, Math.min(108, bw - 14), 24, 5); ctx.fillStyle = 'rgba(57,12,13,0.9)'; ctx.fill(); ctx.fillStyle = '#ffb19f'; ctx.font = '800 12px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText('BOSS活动范围', bx + 7 + Math.min(108, bw - 14) / 2, by + 24, Math.min(98, bw - 24)); ctx.textAlign = 'left'; ctx.restore();
+  }
+  scene.cells.forEach((tile) => { if (tile.marker || tile.enemyCount > 0) drawBountyMapMarker(ctx, tile, x + tile.x * cell, y + tile.y * cell, cell); });
+  ctx.fillStyle = '#cddbd1'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; for (let col = 0; col < width; col++) ctx.fillText(String.fromCharCode(65 + col), x + col * cell + cell / 2, y - 17); ctx.textAlign = 'right'; for (let row = 0; row < height; row++) ctx.fillText(String(row + 1), x - 18, y + row * cell + cell / 2 + 4); ctx.textAlign = 'left';
+  return { width: mapW, height: mapH };
+}
+
+function drawBountyPlayerCard(ctx, player, x, y, width, height) {
+  const accent = player.bounty ? '#ffd66e' : player.status === '倒地' ? '#df7180' : player.status === '死亡' ? '#76746e' : player.teamId % 2 ? '#7fc7b7' : '#a9bfe4';
+  roundedRect(ctx, x, y, width, height, 10); ctx.fillStyle = 'rgba(12,17,18,0.9)'; ctx.fill(); ctx.strokeStyle = `${accent}aa`; ctx.lineWidth = player.bounty ? 3 : 1.5; ctx.stroke();
+  ctx.fillStyle = accent; ctx.font = '700 15px "Microsoft YaHei", sans-serif'; ctx.fillText(`${player.name}${player.isBot ? ' · Bot' : player.isGuest ? ' · 游客' : ''}`, x + 14, y + 23, width - 86); ctx.textAlign = 'right'; ctx.fillText(`Lv${player.level}`, x + width - 13, y + 23, 54); ctx.textAlign = 'left';
+  ctx.fillStyle = '#d7e2dc'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText(`队${player.teamId || '-'} · ${player.status} · 技能点${Math.floor(player.skillPoints || 5)}`, x + 14, y + 43, width - 28);
+  if (player.pos) ctx.fillText(`位置 ${player.pos} · HP ${Math.floor(player.hp)}/${Math.floor(player.maxHp)} · 耐力 ${Math.floor(player.stamina)}/3`, x + 14, y + 62, width - 28);
+  if (player.weapon) { const loadout = player.weapons && player.weapons.length > 1 ? player.weapons.join(' / ') : player.weapon; ctx.fillText(`${loadout} · 弹${Math.floor(player.ammo)}/${Math.floor(player.reserve)} · 击倒${Math.floor(player.kills || 0)} · 线索${Math.floor(player.clues || 0)}`, x + 14, y + 81, width - 28); }
+  const traitText = player.fieldTraits && player.fieldTraits.length ? player.fieldTraits.join('、') : player.fieldTraitCount ? `已获${player.fieldTraitCount}项（私人可见）` : '暂无'; ctx.fillStyle = player.fieldTraitCount ? '#caa7ff' : '#83918c'; ctx.fillText(`地图特质：${traitText}`, x + 14, y + 99, width - 28);
+  if (height >= 130 && player.items && player.items.length) { ctx.fillStyle = '#d8b779'; ctx.font = '11px "Microsoft YaHei", sans-serif'; ctx.fillText(`装备：${player.items.join('、')}`, x + 14, y + 117, width - 28); }
+}
+
+function drawBountyMenuEntries(ctx, scene) {
+  roundedRect(ctx, 54, 126, 1092, 650, 18); ctx.fillStyle = 'rgba(10,17,19,0.9)'; ctx.fill(); ctx.strokeStyle = 'rgba(200,149,73,0.65)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#e0b766'; ctx.font = '800 29px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(scene.menuTitle || '猎场资料', 600, 180); ctx.fillStyle = '#aebdb7'; ctx.font = '14px "Microsoft YaHei", sans-serif'; if (scene.menuTotal > 1) ctx.fillText(`第${scene.menuPage}/${scene.menuTotal}页`, 600, 206);
+  const entries = scene.menuEntries || []; const columns = entries.length > 6 ? 2 : 1; const gap = 18; const cardWidth = columns === 2 ? 511 : 940; const rows = Math.max(1, Math.ceil(entries.length / columns)); const cardHeight = Math.min(104, Math.floor((478 - Math.max(0, rows - 1) * gap) / rows));
+  entries.forEach((entry, index) => { const column = columns === 2 ? index % 2 : 0; const row = columns === 2 ? Math.floor(index / 2) : index; const x = columns === 2 ? 80 + column * (cardWidth + gap) : 130; const y = 226 + row * (cardHeight + gap); roundedRect(ctx, x, y, cardWidth, cardHeight, 10); ctx.fillStyle = entry.disabled ? 'rgba(70,70,70,0.35)' : entry.selected ? 'rgba(200,149,73,0.2)' : 'rgba(255,255,255,0.055)'; ctx.fill(); ctx.strokeStyle = entry.selected ? '#ffd66e' : entry.disabled ? '#6e7370' : 'rgba(255,255,255,0.16)'; ctx.lineWidth = entry.selected ? 2.5 : 1; ctx.stroke(); ctx.fillStyle = entry.disabled ? '#8b918e' : entry.selected ? '#ffd66e' : '#f2f5ef'; ctx.font = '700 17px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'left'; ctx.fillText(entry.title, x + 16, y + 25, cardWidth - 160); ctx.textAlign = 'right'; ctx.fillStyle = entry.selected ? '#ffd66e' : '#82d5d0'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(entry.tag, x + cardWidth - 15, y + 24, 135); ctx.textAlign = 'left'; ctx.fillStyle = '#cfdbd5'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(entry.detail, x + 16, y + 51, cardWidth - 32); if (cardHeight >= 82) { ctx.fillStyle = '#98aaa3'; ctx.font = '12px "Microsoft YaHei", sans-serif'; wrapLine(ctx, entry.extra, cardWidth - 32).slice(0, 2).forEach((line, lineIndex) => ctx.fillText(line, x + 16, y + 74 + lineIndex * 17, cardWidth - 32)); } });
+  const contentBottom = entries.length ? 226 + (rows - 1) * (cardHeight + gap) + cardHeight : 306;
+  const noticeTop = Math.min(704, contentBottom + 22);
+  roundedRect(ctx, 126, noticeTop, 948, 48, 10); ctx.fillStyle = 'rgba(200,149,73,0.13)'; ctx.fill(); ctx.fillStyle = '#f1dfb8'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; const noticeRows = wrapLine(ctx, scene.menuNotice || '选择一项资料继续。', 900).slice(0, 2); noticeRows.forEach((line, index) => ctx.fillText(line, 600, noticeTop + 20 + index * 18, 900)); ctx.textAlign = 'left';
+}
+
+function drawBountyScene(ctx, view) {
+  const scene = view.bountyScene; drawSceneHeader(ctx, view, '#c89549');
+  if (scene.mode === 'menu') {
+    if (scene.menuMode !== 'home' || scene.menuEntries.length) drawBountyMenuEntries(ctx, scene);
+    else { roundedRect(ctx, 54, 126, 1092, 650, 18); ctx.fillStyle = 'rgba(10,17,19,0.88)'; ctx.fill(); ctx.strokeStyle = 'rgba(200,149,73,0.65)'; ctx.lineWidth = 2; ctx.stroke(); ctx.fillStyle = '#e0b766'; ctx.font = '800 42px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText('赏金对决', 600, 205); ctx.fillStyle = '#d7e1da'; ctx.font = '18px "Microsoft YaHei", sans-serif'; ctx.fillText('13×13猎场 · 随机地图事件 · 独立怪物AI', 600, 245); ctx.textAlign = 'left'; const entries = ['初始5技能点、Lv1；等级=技能点-4', '地图遗物授予高级特质与技能点', '侦查发现异动，站在对应格搜索触发', '怪物在猎人行动后独立追踪与攻击', '枪声、冲刺、警铃会吸引附近怪物', '肉傀儡/水鬼/尖啸者/铁甲虫/血猎犬', '成功带出赏金再获得1技能点', '高级地图特质无法在仓库直接购买']; entries.forEach((line, index) => { roundedRect(ctx, 120 + (index % 2) * 480, 290 + Math.floor(index / 2) * 72, 440, 48, 10); ctx.fillStyle = 'rgba(200,149,73,0.13)'; ctx.fill(); ctx.fillStyle = '#e3d6ba'; ctx.font = '700 15px "Microsoft YaHei", sans-serif'; ctx.fillText(line, 140 + (index % 2) * 480, 320 + Math.floor(index / 2) * 72, 400); }); roundedRect(ctx, 126, 692, 948, 58, 10); ctx.fillStyle = 'rgba(200,149,73,0.13)'; ctx.fill(); ctx.fillStyle = '#f1dfb8'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; wrapLine(ctx, scene.menuNotice || '发送“.赏金 教程 1”查看完整玩法。', 900).slice(0, 2).forEach((line, index) => ctx.fillText(line, 600, 716 + index * 19, 900)); ctx.textAlign = 'left'; }
+  } else {
+    const map = drawBountyMap(ctx, scene, 62, 182, 560, scene.mode !== 'menu');
+    ctx.fillStyle = '#e0b766'; ctx.font = '800 23px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.mapName, 680, 176, 460); ctx.fillStyle = '#cddbd1'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(`第${scene.round}/${scene.maxRounds}回合 · ${scene.mode === 'waiting' ? '等待猎人' : scene.mode === 'playing' ? '行动同步中' : '对局已结束'}`, 680, 205, 460);
+    if (scene.players.length === 1) drawBountyPlayerCard(ctx, scene.players[0], 680, 230, 470, 142);
+    else scene.players.forEach((player, index) => drawBountyPlayerCard(ctx, player, 680 + (index % 2) * 245, 230 + Math.floor(index / 2) * 124, 230, 112));
+    if (scene.mode === 'finished' && scene.players.length) { roundedRect(ctx, 680, 618, 470, 128, 10); ctx.fillStyle = 'rgba(200,149,73,0.12)'; ctx.fill(); ctx.fillStyle = '#ffd66e'; ctx.font = '700 16px "Microsoft YaHei", sans-serif'; ctx.fillText('终局结算', 700, 646); ctx.fillStyle = '#d7e1da'; ctx.font = '14px "Microsoft YaHei", sans-serif'; (scene.players || []).slice(0, 4).forEach((player, index) => ctx.fillText(`${index + 1}. ${player.name} · Lv${player.level} · ${player.status}${player.bounty ? ' · 赏金' : ''}`, 700, 674 + index * 18, 420)); }
+    if (scene.mode === 'playing') { roundedRect(ctx, 680, 618, 470, 128, 10); ctx.fillStyle = 'rgba(200,149,73,0.12)'; ctx.fill(); ctx.fillStyle = '#ffd66e'; ctx.font = '700 16px "Microsoft YaHei", sans-serif'; ctx.fillText('战场情报', 700, 646); ctx.fillStyle = '#d7e1da'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(`${scene.bossArea.length ? 'Boss范围 已锁定' : `线索 ${scene.clues.join('、') || '未生成'}`} · 异动 ${scene.activeEventCount} · 怪物 ${scene.aliveMonsterCount}${scene.weather === 'fog' ? ' · 浓雾中' : ''}`, 700, 674, 425); ctx.fillText(scene.bossArea.length ? '红色虚线=BOSS活动范围；精确位置仍未知' : '金色“线”=公开线索；事件与怪物仍需侦查', 700, 698); ctx.fillText(scene.bossArea.length ? '进入范围继续侦查，确认巢穴所在格' : '抵达线索格 → 线索/搜索 → 揭示Boss范围', 700, 722); }
+    roundedRect(ctx, 54, 778, 1092, 56, 10); ctx.fillStyle = 'rgba(7,12,13,0.9)'; ctx.fill(); ctx.fillStyle = '#cddbd1'; const recentLogs = scene.ownLogs.slice(-2);
+    if (scene.ownActions.length) { ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText('我的行动已提交，等待本回合统一结算。', 72, 812, 680); }
+    else if (recentLogs.length > 1) { ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText(`我的战报：${recentLogs[0]}`, 72, 800, 680); ctx.fillText(recentLogs[1], 136, 820, 616); }
+    else { ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(recentLogs.length ? `我的战报：${recentLogs[0]}` : '我的行动：等待提交。', 72, 812, 680); }
+    ctx.textAlign = 'right'; ctx.fillStyle = '#8fd7ca'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.help[0] || '.赏金 行动 移动C4|侦查', 1128, 812, 350); ctx.textAlign = 'left';
+  }
+  if (scene.mode !== 'menu') { ctx.fillStyle = '#d2ddd5'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(view.quote || '未知信息属于猎场的一部分。', 600, 860, 1060); ctx.textAlign = 'left'; }
+}
+
+function drawWorkScene(ctx, view) {
+  const scene = view.workScene; drawSceneHeader(ctx, view, '#ef8d7f');
+  roundedRect(ctx, 58, 200, 1084, 600, 18); ctx.fillStyle = 'rgba(12,20,22,0.88)'; ctx.fill(); ctx.strokeStyle = 'rgba(239,141,127,0.58)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#f7f1e6'; ctx.font = '700 26px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.mode === 'stats' ? '工坊统计' : scene.mode === 'summary' ? '本次工作结算' : scene.mode === 'menu' ? '选择一道题开始工作' : `${scene.typeName} · 第${scene.questionNo || (scene.puzzle ? 1 : 0)}题`, 92, 248);
+  ctx.fillStyle = '#c7d1cd'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.fillText(`余额 ${scene.coins} / 发薪上限 ${scene.workLimit} · 200游戏币/小时`, 92, 278);
+  const stats = scene.stats || {};
+  if (scene.mode === 'summary') {
+    const summary = scene.summary || {};
+    const cards = [['领取题目', summary.issued || 0], ['完成题目', summary.completed || 0], ['答对', summary.solved || 0], ['未通过', summary.failed || 0], ['跳过', summary.skipped || 0], ['错误提交', summary.wrongAnswers || 0], ['毛报酬', summary.gross || 0], ['实际入账', summary.paid || 0], ['平均难度', Number(summary.averageDifficulty || 0).toFixed(1)]];
+    cards.forEach((card, index) => { const x = 92 + (index % 3) * 325; const y = 330 + Math.floor(index / 3) * 125; roundedRect(ctx, x, y, 292, 92, 12); ctx.fillStyle = 'rgba(239,141,127,0.12)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,214,110,0.4)'; ctx.stroke(); ctx.fillStyle = '#a8b6b0'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(card[0], x + 18, y + 27); ctx.fillStyle = '#ffd66e'; ctx.font = '700 29px "Microsoft YaHei", sans-serif'; ctx.fillText(String(card[1]), x + 18, y + 65); });
+    ctx.fillStyle = '#dbe4df'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.fillText(`本班用时 ${Math.floor((summary.elapsedMs || 0) / 1000)}秒 · 平均解题耗时 ${summary.averageSolveSeconds || 0}秒`, 92, 740);
+  } else if (scene.mode === 'stats') {
+    const cards = [['做题数量', stats.questions || 0], ['正确数量', stats.solved || 0], ['最长连对', stats.bestStreak || 0], ['单题最高毛报酬', stats.bestReward || 0], ['实际入账', stats.coinsEarned || 0], ['平均耗时', `${stats.averageSeconds || 0}秒`], ['计算器题数', stats.calculator || 0], ['计算器过关', stats.calculatorSolved || 0], ['专家最高报酬', stats.expertBestReward || 0]];
+    cards.forEach((card, index) => { const x = 92 + (index % 3) * 325; const y = 330 + Math.floor(index / 3) * 125; roundedRect(ctx, x, y, 292, 92, 12); ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fill(); ctx.fillStyle = '#a8b6b0'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(card[0], x + 18, y + 27); ctx.fillStyle = '#ffd66e'; ctx.font = '700 29px "Microsoft YaHei", sans-serif'; ctx.fillText(String(card[1]), x + 18, y + 65); });
+    ctx.fillStyle = '#dbe4df'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.fillText(`分类：24点 ${stats.math24 || 0}（小数${stats.decimal || 0} / 无解${stats.noSolution || 0}） · 计算器 ${stats.calculator || 0}（过关${stats.calculatorSolved || 0}） · 数独 ${stats.sudoku || 0} · 骑士与无赖 ${stats.knights || 0} · Creek ${stats.creek || 0}`, 92, 615, 1000); ctx.fillText(`专家数独：失败${stats.expertFailed || 0} · 揭示答案${stats.expertRevealed || 0} · 最高难度SE等效${Number(stats.expertBestDifficulty || 0).toFixed(2)}`, 92, 648, 1000);
+  } else if (!scene.puzzle) {
+    const hints = ['.打工 开始 24点', '.打工 开始 计算器', '.打工 开始 数独', '.打工 开始 Creek', '.打工 统计'];
+    hints.forEach((hint, index) => { const x = 92 + (index % 2) * 500; const y = 350 + Math.floor(index / 2) * 72; roundedRect(ctx, x, y, 450, 45, 12); ctx.fillStyle = 'rgba(239,141,127,0.15)'; ctx.fill(); ctx.fillStyle = '#ffe2bb'; ctx.font = '700 17px "Microsoft YaHei", sans-serif'; ctx.fillText(hint, x + 20, y + 29); });
+  } else {
+      const puzzle = scene.puzzle; ctx.fillStyle = '#ffd66e'; ctx.font = '700 22px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.typeName, 92, 330);
+      if (scene.lastResult) {
+        roundedRect(ctx, 872, 296, 238, 230, 14); ctx.fillStyle = 'rgba(239,141,127,0.14)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,214,110,0.55)'; ctx.stroke();
+        ctx.fillStyle = '#ffd66e'; ctx.font = '700 17px "Microsoft YaHei", sans-serif'; ctx.fillText('上一题结算', 892, 326);
+        ctx.fillStyle = '#dce7e1'; ctx.font = '15px "Microsoft YaHei", sans-serif';
+        ctx.fillText(`耗时 ${Math.floor((scene.lastResult.durationMs || 0) / 1000)}秒`, 892, 360);
+         ctx.fillText(`获得 ${scene.lastResult.reward || 0} 币`, 892, 390);
+         ctx.fillText(`难度 ${scene.lastResult.difficulty || '标准'}`, 892, 420);
+         if (scene.lastResult.difficultyScore) ctx.fillText(`评分 ${Number(scene.lastResult.difficultyScore).toFixed(1)}`, 892, 438);
+         ctx.fillText(scene.lastResult.formal ? '正式工资' : '热身记录', 892, scene.lastResult.difficultyScore ? 468 : 450);
+      }
+      let y = scene.type === 'sudoku' || scene.type === 'expertSudoku' || scene.type === 'creek' ? 390 : 374;
+    if (scene.type === 'math24') { ctx.fillStyle = '#f4f1e8'; ctx.font = '700 34px "Microsoft YaHei", sans-serif'; ctx.fillText(`${(puzzle.numbers || []).join('   ')}   =   ${puzzle.target || 24}`, 110, y); y += 58; ctx.fillStyle = '#bdcbc5'; ctx.font = '17px "Microsoft YaHei", sans-serif'; ctx.fillText(puzzle.noSolution ? '可以提交：无解' : '答案：四个数字各用一次组成目标，可用 x / * / ×', 110, y); }
+    else if (scene.type === 'sudoku' || scene.type === 'expertSudoku') {
+      const grid = String(puzzle.puzzle || '').padEnd(81, '0'); const cell = 34; const left = 110; const top = y - 30;
+      roundedRect(ctx, left - 12, top - 12, cell * 9 + 24, cell * 9 + 24, 10); ctx.fillStyle = 'rgba(240,245,241,0.06)'; ctx.fill();
+      for (let row = 0; row < 9; row++) for (let col = 0; col < 9; col++) {
+        const value = grid[row * 9 + col]; const x = left + col * cell; const yy = top + row * cell;
+        const boxIndex = Math.floor(row / 3) + Math.floor(col / 3);
+        ctx.fillStyle = boxIndex % 2 ? 'rgba(255,255,255,0.045)' : 'rgba(255,214,110,0.055)'; ctx.fillRect(x, yy, cell, cell);
+        ctx.strokeStyle = 'rgba(220,232,225,0.2)'; ctx.lineWidth = 1; ctx.strokeRect(x, yy, cell, cell);
+        if (value !== '0') { ctx.fillStyle = '#edf3ee'; ctx.font = '700 22px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(value, x + cell / 2, yy + 29); ctx.textAlign = 'left'; }
+      }
+      ctx.strokeStyle = 'rgba(255,214,110,0.92)'; ctx.lineWidth = 3;
+      for (let boxRow = 0; boxRow < 3; boxRow++) for (let boxCol = 0; boxCol < 3; boxCol++) {
+        ctx.strokeRect(left + boxCol * cell * 3, top + boxRow * cell * 3, cell * 3, cell * 3);
+      }
+       ctx.fillStyle = '#bdcbc5'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(`${scene.type === 'expertSudoku' ? `专家题：Sudoku Coach校准 SE≈${Number(scene.difficultyScore || 8.1).toFixed(1)} · ${scene.difficultyTier || 'Beyond Hell (10)'}。` : '粗线分隔九宫格；'}空白格请填入1-9。可交完整81位，或只交${puzzle.blankCount || 0}个空格数字。`, 110, top + cell * 9 + 34); y = top + cell * 9 + 64;
+    }
+    else if (scene.type === 'knights') { ctx.fillStyle = '#f4f1e8'; ctx.font = '18px "Microsoft YaHei", sans-serif'; (puzzle.statements || []).forEach((line, index) => ctx.fillText(line, 112, y + index * 36)); y += (puzzle.statements || []).length * 36 + 20; ctx.fillStyle = '#ffd66e'; ctx.fillText('答案格式：1T2F3F（允许错误一次；首次错误提示双方人数）', 112, y); }
+    else if (scene.type === 'calculator') {
+      const boxX = 112; const boxY = y - 32; const boxW = 660; const boxH = 100;
+      roundedRect(ctx, boxX, boxY, boxW, boxH, 14); ctx.fillStyle = 'rgba(17,31,34,0.96)'; ctx.fill(); ctx.strokeStyle = '#82d5d0'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = '#8edbd2'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(`第${puzzle.level || '?'}关 · 剩余步数 ${puzzle.stepsLeft || 0}/${puzzle.stepLimit || 0}`, boxX + 22, boxY + 28);
+      ctx.fillStyle = '#f4f1e8'; ctx.font = '700 38px Consolas, "Microsoft YaHei", sans-serif'; ctx.textAlign = 'right'; ctx.fillText(String(puzzle.value || '0'), boxX + boxW - 24, boxY + 72); ctx.textAlign = 'left';
+      ctx.fillStyle = '#ffd66e'; ctx.font = '700 23px "Microsoft YaHei", sans-serif'; ctx.fillText(`目标 ${puzzle.target || 0}`, boxX + 24, boxY + 72);
+      const buttons = puzzle.options || []; const buttonY = boxY + 132; const buttonW = 150; const buttonH = 58;
+      buttons.forEach((option, index) => { const bx = 112 + (index % 4) * 168; const by = buttonY + Math.floor(index / 4) * 78; roundedRect(ctx, bx, by, buttonW, buttonH, 10); ctx.fillStyle = option.color || '#db7633'; ctx.fill(); ctx.fillStyle = '#fff7ed'; ctx.font = '700 18px "Microsoft YaHei", sans-serif'; ctx.fillText(`${option.index}. ${option.label}`, bx + 16, by + 35, buttonW - 26); });
+      const history = puzzle.history || []; ctx.fillStyle = '#c9d5d1'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(history.length ? `操作记录：${history.map((item) => `${item.option}:${item.after}`).join('  ')}` : '操作记录：尚未按键', 112, buttonY + Math.ceil(buttons.length / 4) * 78 + 18, 980);
+      ctx.fillStyle = '#bdcbc5'; ctx.fillText('指令：.打工 按 221122333（连续按键） · 需要参数的按钮请单独输入“按 编号 参数”', 112, buttonY + Math.ceil(buttons.length / 4) * 78 + 48, 980);
+    }
+    else {
+      const cell = Math.min(44, Math.floor(850 / Math.max(1, puzzle.width)), Math.floor(315 / Math.max(1, puzzle.height))); const boardWidth = puzzle.width * cell; const boardHeight = puzzle.height * cell; const left = 600 - boardWidth / 2; const top = y - 25; const clues = puzzle.clues || [];
+      ctx.fillStyle = '#b8c7c1'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(`${puzzle.height} × ${puzzle.width} · ${puzzle.unique ? '唯一解已校验' : '内部顶点提示'}`, left, top - 18);
+      for (let row = 0; row < puzzle.height; row++) for (let col = 0; col < puzzle.width; col++) { const x = left + col * cell; const yy = top + row * cell; ctx.fillStyle = (row + col) % 2 ? 'rgba(71,111,110,0.32)' : 'rgba(57,88,88,0.46)'; ctx.fillRect(x, yy, cell, cell); ctx.strokeStyle = 'rgba(173,218,203,0.38)'; ctx.lineWidth = 1; ctx.strokeRect(x, yy, cell, cell); }
+      ctx.strokeStyle = 'rgba(255,214,110,0.9)'; ctx.lineWidth = 3; ctx.strokeRect(left, top, boardWidth, boardHeight);
+      ctx.font = `700 ${Math.max(16, Math.min(20, Math.floor(cell * 0.48)))}px "Microsoft YaHei", sans-serif`; ctx.textAlign = 'center';
+      for (let row = 1; row < puzzle.height; row++) for (let col = 1; col < puzzle.width; col++) { const x = left + col * cell; const yy = top + row * cell; const line = String(clues[row] || ''); const value = line[col]; ctx.beginPath(); ctx.fillStyle = 'rgba(242,247,238,0.96)'; ctx.arc(x, yy, Math.max(9, Math.min(11, cell * 0.24)), 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = '#273739'; if (value != null) ctx.fillText(value, x, yy + Math.max(6, cell * 0.17)); }
+      ctx.textAlign = 'left'; ctx.fillStyle = '#bdcbc5'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText('圆点只显示内部顶点提示；金色长方形是题目边界。每格写1表示雷，写0表示空。', left, top + boardHeight + 28, Math.max(520, boardWidth)); y = top + boardHeight + 54;
+    }
+     roundedRect(ctx, 92, 735, 1016, 46, 12); ctx.fillStyle = 'rgba(255,255,255,0.07)'; ctx.fill(); ctx.fillStyle = '#e9eeeb'; ctx.font = '16px "Microsoft YaHei", sans-serif'; const actionHint = scene.type === 'calculator' ? '发送“.打工 按 <按钮序列>”操作' : '发送“.打工 答案 <答案>”提交'; const footer = scene.mode === 'solved' ? '本题已结算 · 发送“.打工 专家数独”挑战下一题' : scene.mode === 'revealed' ? '本题已结束 · 发送“.打工 专家数独”挑战下一题' : `${scene.formal ? '正式' : '热身'} · 难度 ${scene.difficultyLabel || '标准'} · 容错 ${scene.attemptsLeft ? '可用' : '已用尽'} · 已耗时 ${Math.floor(scene.elapsedMs / 1000)}秒 · ${actionHint}`; ctx.fillText(footer, 112, 765, 980);
+  }
+  ctx.fillStyle = '#cfd9d4'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(view.quote || '题目没有输家，只有下一道题。', 600, 850, 1050); ctx.textAlign = 'left';
+}
+
+function drawDemonScene(ctx, view) {
+  const scene = view.demonScene; drawSceneHeader(ctx, view, '#d84f63');
+  if (!scene || scene.mode === 'menu') {
+    ctx.fillStyle = '#f4d6db'; ctx.font = '700 24px "Microsoft YaHei", sans-serif'; ctx.fillText('SpaceAdventure · 恶魔轮盘赌 V3.1', 92, 145);
+    if (scene && scene.menuTab === 'wiki') {
+      ctx.fillStyle = '#f0a5b0'; ctx.font = '700 18px "Microsoft YaHei", sans-serif'; ctx.fillText('道具', 92, 182); ctx.fillText('符文', 620, 182);
+      (scene.items || []).forEach((item, i) => { const y = 208 + i * 39; ctx.fillStyle = '#f4d6db'; ctx.font = '700 15px "Microsoft YaHei", sans-serif'; ctx.fillText(item.name, 100, y); ctx.fillStyle = '#cbd7d1'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(item.desc, 100, y + 17, 470); });
+      (scene.runes || []).forEach((rune, i) => { const y = 216 + i * 58; ctx.fillStyle = '#f4d6db'; ctx.font = '700 15px "Microsoft YaHei", sans-serif'; ctx.fillText(rune.name, 628, y); ctx.fillStyle = '#cbd7d1'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(rune.desc, 628, y + 20, 470); });
+    } else {
+      ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#d6e0dc'; let y = 186;
+      (scene && scene.modes || []).forEach((m) => { ctx.fillStyle = '#f0a5b0'; ctx.fillText(`${m.name}  HP${Array.isArray(m.hp) ? m.hp.join('/') : m.hp}  x${Number(m.multiplier || 1).toFixed(2)}`, 100, y); ctx.fillStyle = '#d6e0dc'; ctx.fillText(m.desc, 315, y, 760); y += 43; });
+    }
+    ctx.fillStyle = '#c4cfca'; ctx.fillText('指令：.恶魔 人机 [模式] · .恶魔 开房 [模式] · .恶魔 模式 · .恶魔 百科', 100, 730); return;
+  }
+  ctx.fillStyle = '#f2c1c8'; ctx.font = '700 20px "Microsoft YaHei", sans-serif'; ctx.fillText(`模式：${scene.modeKey || '经典'}  ·  结算倍率 x${Number(scene.modeMultiplier || 1).toFixed(2)}  ·  第${scene.round || 0}轮`, 92, 138);
+  ctx.fillStyle = '#dce4de'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.turn ? `当前行动：${scene.turn}` : '等待玩家操作', 92, 166);
+  const players = scene.players || []; const cardW = 250; players.forEach((p, i) => { const x = 92 + (i % 2) * 766; const y = 200 + Math.floor(i / 2) * 190; roundedRect(ctx, x, y, cardW, 165, 10); ctx.fillStyle = 'rgba(10,16,18,0.88)'; ctx.fill(); ctx.strokeStyle = p.current ? '#f2c15f' : p.dead ? '#777d7a' : '#d84f63'; ctx.lineWidth = p.current ? 3 : 1.5; ctx.stroke(); ctx.fillStyle = p.dead ? '#8d9691' : '#f5eee9'; ctx.font = '700 18px "Microsoft YaHei", sans-serif'; ctx.fillText(`${p.index}. ${p.name}${p.current ? ' · 行动中' : ''}`, x + 16, y + 28, 218); ctx.fillStyle = p.hp > 0 ? '#df7d8b' : '#767c78'; ctx.fillRect(x + 16, y + 48, 210 * Math.max(0, Math.min(1, p.hp / p.maxHp)), 12); ctx.fillStyle = '#dce4de'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(`HP ${p.hp}/${p.maxHp}  ·  护身符 ${p.amulets}`, x + 16, y + 82); const publicItems = Array.isArray(p.items) ? p.items : []; const itemRows = publicItems.length ? [publicItems.slice(0, 6).join('、'), publicItems.slice(6, 12).join('、')] : ['无道具']; ctx.fillStyle = '#e9c7ce'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText(`道具：${itemRows[0]}`, x + 16, y + 106, 218); if (itemRows[1]) ctx.fillText(itemRows[1], x + 16, y + 124, 218); ctx.fillStyle = '#aebcb5'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText(`伤害 ${p.damage} · 击杀 ${p.kills}`, x + 16, y + 148); });
+  roundedRect(ctx, 372, 200, 456, 150, 10); ctx.fillStyle = 'rgba(8,13,15,0.88)'; ctx.fill(); ctx.strokeStyle = '#d84f63'; ctx.stroke(); ctx.fillStyle = '#f2c1c8'; ctx.font = '700 18px "Microsoft YaHei", sans-serif'; ctx.fillText('弹仓', 394, 230); ctx.fillStyle = '#dce4de'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.fillText(`剩余 ${scene.shellCount || 0} 发 · 实弹 ${scene.shellLive || 0} · 空弹 ${scene.shellBlank || 0}`, 394, 264); ctx.fillStyle = '#9eaaa4'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText('弹仓已打乱，仅显示数量，不展示牌序。', 394, 298, 410); if (scene.glassActive && scene.glassResult) { ctx.fillStyle = '#ffd166'; ctx.font = '700 14px "Microsoft YaHei", sans-serif'; ctx.fillText(`放大镜情报：下一发为${scene.glassResult}`, 394, 324, 410); }
+  const actionLogs = (scene.logs || []).slice(-24); ctx.fillStyle = '#bdcbc5'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(scene.logTitle || '最近记录', 92, 580); actionLogs.forEach((line, i) => { const column = Math.floor(i / 12); const row = i % 12; ctx.fillStyle = i === actionLogs.length - 1 ? '#f0a5b0' : '#c3cfca'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText(line, 92 + column * 520, 604 + row * 16, 490); });
+  ctx.fillStyle = '#d6e0dc'; ctx.font = '15px "Microsoft YaHei", sans-serif'; ctx.fillText('开枪 自己/对手/序号 · 使用 <道具> [目标] · 购买 <道具> · 盘面 · 认输', 92, 806, 1020);
+}
+
+function drawAlchemyCard(ctx, card, x, y, w, h, art) {
+  const colors = { SPIRIT: '#b895f5', WATER: '#55bce8', FIRE: '#ef765f', EARTH: '#c99a65', AIR: '#9ed7c5', CONSERVATION: '#f2d06b', DARKSACRIFICE: '#9f83c9', SNATCH: '#e8a85c', ORACLE: '#f5da79', TIMEMACHINE: '#72d4c0' };
+  const names = { SPIRIT: '灵魂', WATER: '水', FIRE: '火', EARTH: '土', AIR: '气', CONSERVATION: '守恒', DARKSACRIFICE: '黑暗祭祀', SNATCH: '物质吸取', ORACLE: '神谕配方', TIMEMACHINE: '时间机器' };
+  const color = colors[card.attr] || '#b895f5'; roundedRect(ctx, x, y, w, h, 7); ctx.fillStyle = 'rgba(12,15,24,0.95)'; ctx.fill(); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+  if (art) { ctx.save(); roundedRect(ctx, x + 3, y + 3, w - 6, h - 6, 5); ctx.clip(); ctx.drawImage(art, x + 3, y + 3, w - 6, h - 6); ctx.restore(); }
+  ctx.fillStyle = color; ctx.font = `700 ${Math.max(14, Math.floor(h * 0.3))}px "Microsoft YaHei", sans-serif`; ctx.textAlign = 'center'; if (!art) ctx.fillText(names[card.attr] || card.attr, x + w / 2, y + h * 0.58, w - 6); ctx.textAlign = 'left';
+}
+
+function drawAlchemyTable(ctx, view, alchemyArt) {
+  const table = view.alchemyTable || {}; drawSceneHeader(ctx, view, '#b895f5');
+  if (table.status === 'menu') {
+    roundedRect(ctx, 78, 170, 1044, 570, 16); ctx.fillStyle = 'rgba(20,16,35,0.82)'; ctx.fill(); ctx.strokeStyle = '#b895f5'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#f5eaff'; ctx.font = '800 34px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText('魔幻牌炼金术师', 600, 238); ctx.fillStyle = '#dfd2e9'; ctx.font = '17px "Microsoft YaHei", sans-serif'; ctx.fillText('80张牌 · 7张手牌 · 12轮炼金竞赛', 600, 274); ctx.textAlign = 'left';
+    (view.lines || []).forEach((line, i) => { ctx.fillStyle = i === 2 ? '#f2d06b' : '#e7e0eb'; ctx.font = '16px "Microsoft YaHei", sans-serif'; ctx.fillText(line, 130, 340 + i * 52, 940); });
+    return;
+  }
+  ctx.fillStyle = '#f0e6ff'; ctx.font = '700 22px "Microsoft YaHei", sans-serif'; ctx.fillText(`第${table.round}/${table.maxRounds}轮 · 当前：${table.current || '—'}`, 70, 126);
+  ctx.fillStyle = '#cbbdde'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(`牌堆 ${table.deckCount} · 弃牌 ${table.discardCount}`, 930, 126);
+  const players = table.players || []; players.forEach((p, i) => {
+    const x = 60 + (i % 2) * 560; const y = 166 + Math.floor(i / 2) * 188; const cardHeight = 180;
+    roundedRect(ctx, x, y, 520, cardHeight, 10); ctx.fillStyle = 'rgba(15,13,24,0.88)'; ctx.fill(); ctx.strokeStyle = p.isTurn ? '#f2d06b' : 'rgba(184,149,245,0.45)'; ctx.lineWidth = p.isTurn ? 3 : 1.5; ctx.stroke();
+    ctx.fillStyle = p.isTurn ? '#f2d06b' : '#f0e6ff'; ctx.font = '700 18px "Microsoft YaHei", sans-serif'; ctx.fillText(`${p.name}${p.isBot ? ' · AI' : ''}${p.isTurn ? ' · 行动中' : ''}`, x + 16, y + 27);
+    ctx.fillStyle = '#d8cbe5'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(`得分 ${p.score} · 手牌 ${p.handCount} · 炼金池 ${p.poolCount}`, x + 16, y + 52);
+    // 手牌固定在左侧双行区域，避免物质吸取抽牌后挤出玩家框；逻辑层已按属性顺序整理。
+    const hand = p.hand || []; const handAreaW = 292; const handAreaH = 106;
+    if (hand.length) {
+      // 两行是常态；极端多张手牌时压缩为最多三行，保证永不越出玩家框。
+      const rows = hand.length <= 12 ? 2 : 3; const perRow = Math.ceil(hand.length / rows); const gapX = 4; const gapY = 4; const cardW = Math.max(24, Math.min(44, Math.floor((handAreaW - (perRow - 1) * gapX) / perRow))); const cardH = Math.max(27, Math.min(48, Math.floor((handAreaH - (rows - 1) * gapY) / rows)));
+      hand.forEach((card, cardIndex) => { const row = Math.floor(cardIndex / perRow); const col = cardIndex % perRow; const rowCount = Math.min(perRow, hand.length - row * perRow); const rowWidth = rowCount * cardW + (rowCount - 1) * gapX; const startX = x + 16 + Math.max(0, (handAreaW - rowWidth) / 2); drawAlchemyCard(ctx, card, startX + col * (cardW + gapX), y + 62 + row * (cardH + gapY), cardW, cardH, alchemyArt && alchemyArt[card.attr]); });
+    } else { ctx.fillStyle = '#847695'; ctx.font = '13px "Microsoft YaHei", sans-serif'; ctx.fillText('手牌对其他玩家隐藏', x + 16, y + 98); }
+    // 独立右侧区域显示本轮已出，不再覆盖手牌。
+    const played = p.played || []; const groups = Array.isArray(p.playedGroups) && p.playedGroups.length ? p.playedGroups : (played.length ? [played] : []);
+    ctx.fillStyle = '#f2d06b'; ctx.font = '700 12px "Microsoft YaHei", sans-serif'; ctx.fillText('本轮已出', x + 326, y + 73);
+    if (groups.length) {
+      const visibleGroups = groups.length > 2 ? [groups[0], groups.slice(1).reduce((all, group) => all.concat(group || []), [])] : groups;
+      visibleGroups.slice(0, 2).forEach((group, groupIndex) => {
+        const labelY = y + 82 + groupIndex * 31; const cardsY = labelY + 3; const rawCards = Array.isArray(group) ? group : [];
+        const cardEntries = groupIndex === 0 ? rawCards.slice(0, 16).map((card) => ({ card, count: 1 })) : Object.keys(rawCards.reduce((counts, card) => { if (card && card.attr) { if (!counts[card.attr]) counts[card.attr] = { card, count: 0 }; counts[card.attr].count += 1; } return counts; }, {})).map((attr) => rawCards.reduce((counts, card) => { if (card && card.attr) { if (!counts[card.attr]) counts[card.attr] = { card, count: 0 }; counts[card.attr].count += 1; } return counts; }, {})[attr]);
+        const groupLabel = groupIndex === 0 ? '第1次' : (groups.length > 2 ? `第2次+后续${Math.max(1, (p.playedGroupCount || groups.length) - 2)}次` : '第2次');
+        ctx.fillStyle = '#cbbdde'; ctx.font = '10px "Microsoft YaHei", sans-serif'; ctx.fillText(groupLabel, x + 318, labelY);
+        const availableW = 196; const gap = 2; const cardW = cardEntries.length ? Math.max(16, Math.min(36, Math.floor((availableW - (cardEntries.length - 1) * gap) / cardEntries.length))) : 20; const cardH = 27;
+        cardEntries.forEach((entry, j) => { const cardX = x + 318 + j * (cardW + gap); drawAlchemyCard(ctx, entry.card, cardX, cardsY, cardW, cardH, alchemyArt && alchemyArt[entry.card.attr]); if (entry.count > 1) { ctx.fillStyle = 'rgba(8,8,12,0.9)'; ctx.fillRect(cardX + Math.max(0, cardW - 18), cardsY + 13, 18, 14); ctx.fillStyle = '#ffffff'; ctx.font = '700 9px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`x${entry.count}`, cardX + cardW - 9, cardsY + 23, 18); ctx.textAlign = 'left'; } });
+        if (!cardEntries.length) { ctx.fillStyle = '#847695'; ctx.font = '11px "Microsoft YaHei", sans-serif'; ctx.fillText('暂无', x + 360, cardsY + 22); }
+      });
+    } else { ctx.fillStyle = '#847695'; ctx.font = '12px "Microsoft YaHei", sans-serif'; ctx.fillText('暂无', x + 326, y + 98); }
+    ctx.fillStyle = '#bdaecd'; ctx.font = '11px "Microsoft YaHei", sans-serif'; ctx.fillText(p.lastAction || '等待行动', x + 16, y + 172, 480);
+  });
+  if (table.status === 'finished' && table.ranking && table.ranking.length) {
+    roundedRect(ctx, 60, 545, 1080, 195, 12); ctx.fillStyle = 'rgba(20,16,35,0.92)'; ctx.fill(); ctx.strokeStyle = '#f2d06b'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#f2d06b'; ctx.font = '800 28px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText('炼金竞赛 · 最终排名', 600, 584);
+    table.ranking.forEach((row, index) => { const x = 96 + index * 260; ctx.fillStyle = index === 0 ? '#ffd86b' : '#eadff2'; ctx.font = '800 22px "Microsoft YaHei", sans-serif'; ctx.fillText(`#${row.rank} ${row.name}`, x + 110, 630); ctx.fillStyle = '#ffffff'; ctx.font = '700 25px "Microsoft YaHei", sans-serif'; ctx.fillText(`${row.score} 分`, x + 110, 666); ctx.fillStyle = row.coinReward > 0 ? '#82d5c0' : '#bd9fab'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(`${row.coinReward >= 0 ? '+' : ''}${row.coinReward} 币  ${row.affectionDelta >= 0 ? '+' : ''}${row.affectionDelta} 好感`, x + 110, 695); });
+    ctx.textAlign = 'left';
+  } else {
+    const notice = table.poolClearNotice || '';
+    if (notice) { roundedRect(ctx, 60, 538, 1080, 30, 7); ctx.fillStyle = 'rgba(105,73,145,0.78)'; ctx.fill(); ctx.strokeStyle = '#f2d06b'; ctx.lineWidth = 1.5; ctx.stroke(); ctx.fillStyle = '#fff1b8'; ctx.font = '700 13px "Microsoft YaHei", sans-serif'; ctx.fillText(notice, 82, 558, 1040); }
+    const logY = notice ? 576 : 560;
+    roundedRect(ctx, 60, logY, 1080, 105, 8); ctx.fillStyle = 'rgba(20,16,35,0.85)'; ctx.fill(); ctx.fillStyle = '#e4d9ee'; ctx.font = '13px "Microsoft YaHei", sans-serif'; (table.logs || []).slice(-6).forEach((line, i) => ctx.fillText(line, 82, logY + 25 + i * 17, 1040));
+    const quoteY = notice ? 706 : 690;
+    roundedRect(ctx, 60, quoteY, 1080, 52, 8); ctx.fillStyle = 'rgba(184,149,245,0.12)'; ctx.fill(); ctx.fillStyle = '#f2d06b'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(view.quote || '选牌 1,3 · 选牌 Ax3 · 选牌 FFF · 使用神谕配方(O) · 结束。', 82, quoteY + 32, 1040);
+  }
+}
+
 async function renderView(rawView) {
   const view = normalizeView(rawView);
-  const width = 1200;
-  const height = 900;
+  const baseWidth = 1200;
+  const baseHeight = 900;
+  const renderScale = view.alchemyTable ? 2 : 1;
+  const width = baseWidth * renderScale;
+  const height = baseHeight * renderScale;
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
-  const backgroundPath = view.auctionScene && view.auctionScene.mode === 'result' && view.auctionScene.sold ? BACKGROUNDS.auctionOpen : backgroundFor(view.kind);
+  if (renderScale !== 1) ctx.scale(renderScale, renderScale);
+  const backgroundPath = view.auctionScene && view.auctionScene.mode === 'result' && view.auctionScene.sold
+    ? BACKGROUNDS.auctionOpen
+    : view.bountyScene && view.bountyScene.mode === 'finished'
+      ? BACKGROUNDS.bountyResult
+      : backgroundFor(view.kind);
   const background = await cachedImage(backgroundPath);
   const accent = accentFor(view.kind);
+  const fishingSprites = view.fishingScene ? await loadFishingSprites(view.fishingScene) : new Map();
+  const alchemyArt = {};
+  if (view.alchemyTable) {
+    const assetNames = { SPIRIT: 'spirit.png', WATER: 'water.png', FIRE: 'fire.png', EARTH: 'earth.png', AIR: 'air.png', CONSERVATION: 'conservation.png', DARKSACRIFICE: 'dark-sacrifice.png', SNATCH: 'snatch.png', ORACLE: 'oracle.png', TIMEMACHINE: 'time-machine.png' };
+    await Promise.all(Object.keys(assetNames).map(async (key) => { const file = path.join(ALCHEMY_ASSET_DIR, assetNames[key]); if (fs.existsSync(file)) { try { alchemyArt[key] = await cachedImage(file); } catch (error) {} } }));
+  }
 
-  drawCover(ctx, background, width, height);
+  drawCover(ctx, background, baseWidth, baseHeight);
   ctx.fillStyle = 'rgba(12, 16, 18, 0.36)';
-  ctx.fillRect(0, 0, width, height);
+  ctx.fillRect(0, 0, baseWidth, baseHeight);
 
   if (view.tutorial) {
     drawTutorial(ctx, view, accent);
@@ -2625,8 +3941,20 @@ async function renderView(rawView) {
     drawLoveTable(ctx, view);
     return canvas.toBuffer('image/png');
   }
+  if (view.fourKnifeTable) {
+    drawFourKnifeTable(ctx, view);
+    return canvas.toBuffer('image/png');
+  }
+  if (view.landlordTable) {
+    drawLandlordTable(ctx, view);
+    return canvas.toBuffer('image/png');
+  }
+  if (view.fishingCardTable) {
+    drawFishingCardTable(ctx, view);
+    return canvas.toBuffer('image/png');
+  }
   if (view.fishingScene) {
-    drawFishingScene(ctx, view);
+    drawFishingScene(ctx, view, fishingSprites);
     return canvas.toBuffer('image/png');
   }
   if (view.dailyScene) {
@@ -2639,6 +3967,33 @@ async function renderView(rawView) {
   }
   if (view.auctionScene) {
     drawAuctionScene(ctx, view);
+    return canvas.toBuffer('image/png');
+  }
+  if (view.tombScene) {
+    drawTombScene(ctx, view);
+    return canvas.toBuffer('image/png');
+  }
+  if (view.bountyScene) {
+    drawBountyScene(ctx, view);
+    return canvas.toBuffer('image/png');
+  }
+  if (view.demonScene) {
+    drawDemonScene(ctx, view);
+    return canvas.toBuffer('image/png');
+  }
+  if (view.alchemyTable) {
+    drawAlchemyTable(ctx, view, alchemyArt);
+    return canvas.toBuffer('image/png');
+  }
+  if (view.workScene) {
+    drawWorkScene(ctx, view);
+    return canvas.toBuffer('image/png');
+  }
+  if (view.kind === 'landlord' && view.tutorial) {
+    drawSceneHeader(ctx, view, '#e4b85c');
+    roundedRect(ctx, 58, 120, 1084, 700, 10); ctx.fillStyle = 'rgba(15,20,18,0.86)'; ctx.fill();
+    const entries = view.tutorial.entries || []; entries.forEach((entry, index) => { const x = 90 + (index % 2) * 510; const y = 160 + Math.floor(index / 2) * 145; roundedRect(ctx, x, y, 470, 116, 8); ctx.fillStyle = 'rgba(228,184,92,0.12)'; ctx.fill(); ctx.strokeStyle = 'rgba(228,184,92,0.45)'; ctx.stroke(); ctx.fillStyle = '#f3c969'; ctx.font = '700 20px "Microsoft YaHei", sans-serif'; ctx.fillText(entry.title || '', x + 18, y + 30, 430); ctx.fillStyle = '#e9ece7'; ctx.font = '15px "Microsoft YaHei", sans-serif'; wrapLine(ctx, entry.description || '', 430).slice(0, 4).forEach((line, i) => ctx.fillText(line, x + 18, y + 57 + i * 20, 430)); });
+    ctx.fillStyle = '#cfd7d4'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText(view.quote || '', 600, 790, 1000); ctx.textAlign = 'left';
     return canvas.toBuffer('image/png');
   }
 
@@ -2789,4 +4144,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { renderView, normalizeView, server };
+module.exports = { renderView, normalizeView, normalizeFishingCardTable, drawFishingCardTable, drawFourKnifeTable, server };
