@@ -58,6 +58,7 @@
   seal.ext.registerIntConfig(ext, '竞拍游客预算', 500000, '竞拍多人房中游客可使用的虚拟竞拍币，只影响玩法且不会结算。', CONFIG_GROUPS.gameplay);
   seal.ext.registerIntConfig(ext, '赏金对决入场费', 0, '已停用：赏金对决不收取入场费，费用仅来自猎人装备、弹药和道具。', CONFIG_GROUPS.gameplay);
   seal.ext.registerIntConfig(ext, '赏金对决撤离奖励', 300, '携带赏金成功撤离的基础游戏币奖励。', CONFIG_GROUPS.economy);
+  seal.ext.registerBoolConfig(ext, '老虎机跳过免费轮转盘', true, '拉莱耶之轮触发免费旋转狂欢时，是否自动跳过逐轮摇奖直接一次性结算全部免费轮奖金。若关闭，则需要玩家自主发送指令逐次摇奖，下注额锁定为触发时的金额且不消耗游戏币。', CONFIG_GROUPS.gameplay);
 
   seal.ext.registerBoolConfig(ext, '启用图片输出', true, '开启后优先调用图片渲染服务。', CONFIG_GROUPS.image);
   seal.ext.registerStringConfig(ext, '图片服务地址', 'http://127.0.0.1:3891', '配套 renderer/server.js 的地址。', CONFIG_GROUPS.image);
@@ -573,6 +574,7 @@
       videoPokerBestPayout: 0, videoPokerBestHand: '', videoPokerBestHandRank: 0,
       videoPokerHighLowWins: 0, videoPokerBestStreak: 0, videoPokerRevives: 0,
       videoPokerJackpots: 0, videoPokerJackpotWon: 0,
+      slotPlays: 0, slotWins: 0, slotBet: 0, slotPrize: 0, slotBestPrize: 0, slotFreeSpins: 0,
       loveRoundsWon: 0, loveWinsAll: 0, loveCheatWins: 0, loveCheatLosses: 0, loveCheatPenalties: 0,
       loveBestChips: 0, loveBestHandRank: 0, loveBestHand: '',
       alchemyRounds: 0, alchemyElementCards: 0, alchemyMagicUsed: 0, alchemyConservationUsed: 0, alchemyBestScore: 0
@@ -1073,6 +1075,23 @@
       case 'lottery': add('🎟️ 机选', '双色球 机选 1'); add('📊 状态', '双色球 状态'); add('📜 历史', '双色球 历史'); add('🎁 兑奖', '双色球 兑奖结果'); break;
       case 'deathDice': add('☠️ 简单', '生死骰 简单'); add('☠️ 困难', '生死骰 困难'); add('📊 我的', '我的'); break;
       case 'loan': add('💸 申请借款', '借款 申请'); add('💰 查询还款', '借款 状态'); add('📊 我的', '我的'); break;
+      case 'slot':
+        if (view.tutorial) {
+          if (view.tutorial.page === 1) add('📜 赔率表', '老虎机 规则 2');
+          else add('📖 玩法规则', '老虎机 规则 1');
+        }
+        if (view.slotFreeSpin && view.slotFreeSpin.remaining > 0) {
+          add(`🎰 免费旋转 (剩${view.slotFreeSpin.remaining}次)`, '老虎机');
+          add('📜 规则赔率', '老虎机 规则');
+          add('📊 我的', '我的');
+        } else {
+          add('🎰 旋转20', '老虎机 20');
+          add('🎰 旋转100', '老虎机 100');
+          add('🎰 旋转500', '老虎机 500');
+          if (!view.tutorial) add('📜 规则赔率', '老虎机 规则');
+          add('📊 我的', '我的');
+        }
+        break;
       default: addHome(); break;
     }
     const rows = keyboardRows(buttons);
@@ -5198,17 +5217,405 @@
   }
   function scratchMenuView(quote) {
     return {
-      kind: 'scratch', title: '骰娘彩票与风险游戏', subtitle: '即开票 · 视频扑克 · 每日双色球 · 生死骰 · 九出十三归',
+      kind: 'scratch', title: '骰娘彩票与风险游戏', subtitle: '即开票 · 老虎机 · 视频扑克 · 每日双色球 · 生死骰 · 九出十三归',
       lines: [
         '.刮刮 买 [面额] [类型]  |  .刮刮 刮开',
         '.yan 刮刮 买 [面额] [类型]  |  完整写法同样有效',
+        '.老虎机 20~1000  |  .拉莱耶之轮 5x3克苏鲁连线',
         '.刮刮 扑克 10/30/50  |  .视频扑克 10/30/50',
         '.双色球 单注/单组xN/机选N/批量多组  |  每期最多20注，每页显示6组',
         '.双色球 状态/历史/兑奖结果 [页码]  |  .双色球 兑奖',
         '.生死骰 简单/困难  |  押上全部游戏币',
         '.借款 申请  |  余额低于150时可借150，应还195',
         `即开票类型：${SCRATCH_TYPES.join(' / ')}`
-      ], quote: quote || '双色球与生死骰不改变好感；借款会扣除好感，并在还款时恢复该笔损失的一半。'
+      ], quote: quote || '双色球与生死骰不改变好感；借款与老虎机结算好感，并在还款时恢复该笔损失的一半。'
+    };
+  }
+
+  // -------------------- 旧日连线：拉莱耶之轮 (5x3 老虎机) --------------------
+  const SLOT_SYMBOLS = ['PARCHMENT', 'REVOLVER', 'POTION', 'ELDER_SIGN', 'EYE', 'NECRONOMICON', 'STATUE', 'WILD', 'SCATTER'];
+  const SLOT_SYMBOL_NAMES = {
+    PARCHMENT: '古旧羊皮纸',
+    REVOLVER: '左轮手枪',
+    POTION: '可疑药剂',
+    ELDER_SIGN: '旧印石雕',
+    EYE: '修格斯复眼',
+    NECRONOMICON: '死灵之书',
+    STATUE: '拉莱耶金像',
+    WILD: '时空裂隙',
+    SCATTER: '奈亚面具'
+  };
+  const SLOT_WEIGHT_LIST = [
+    { symbol: 'PARCHMENT', weight: 25 },
+    { symbol: 'REVOLVER', weight: 23 },
+    { symbol: 'POTION', weight: 20 },
+    { symbol: 'ELDER_SIGN', weight: 17 },
+    { symbol: 'EYE', weight: 13 },
+    { symbol: 'NECRONOMICON', weight: 8 },
+    { symbol: 'STATUE', weight: 4 },
+    { symbol: 'WILD', weight: 6 },
+    { symbol: 'SCATTER', weight: 4 }
+  ];
+  const SLOT_PAYLINES = [
+    { id: 1, name: '中间横线', path: [1, 1, 1, 1, 1] },
+    { id: 2, name: '顶部横线', path: [0, 0, 0, 0, 0] },
+    { id: 3, name: '底部横线', path: [2, 2, 2, 2, 2] },
+    { id: 4, name: 'V字大凹', path: [0, 1, 2, 1, 0] },
+    { id: 5, name: '倒V大凸', path: [2, 1, 0, 1, 2] },
+    { id: 6, name: '阶梯向下', path: [0, 0, 1, 2, 2] },
+    { id: 7, name: '阶梯向上', path: [2, 2, 1, 0, 0] },
+    { id: 8, name: '顶部浅凹', path: [1, 0, 0, 0, 1] },
+    { id: 9, name: '底部浅凸', path: [1, 2, 2, 2, 1] },
+    { id: 10, name: 'W折线', path: [0, 1, 0, 1, 0] },
+    { id: 11, name: 'M折线', path: [2, 1, 2, 1, 2] },
+    { id: 12, name: '上波浪', path: [1, 0, 1, 0, 1] },
+    { id: 13, name: '下波浪', path: [1, 2, 1, 2, 1] },
+    { id: 14, name: '中凹凸上', path: [0, 0, 1, 0, 0] },
+    { id: 15, name: '中凹凸下', path: [2, 2, 1, 2, 2] },
+    { id: 16, name: '平顶浅槽', path: [0, 1, 1, 1, 0] },
+    { id: 17, name: '平底浅台', path: [2, 1, 1, 1, 2] },
+    { id: 18, name: '滑向平底', path: [0, 1, 2, 2, 2] },
+    { id: 19, name: '滑向平顶', path: [2, 1, 0, 0, 0] },
+    { id: 20, name: '大交错', path: [0, 2, 0, 2, 0] }
+  ];
+  const SLOT_PAYTABLE = {
+    PARCHMENT: { 3: 5, 4: 15, 5: 50 },
+    REVOLVER: { 3: 5, 4: 20, 5: 60 },
+    POTION: { 3: 10, 4: 25, 5: 80 },
+    ELDER_SIGN: { 3: 10, 4: 30, 5: 100 },
+    EYE: { 3: 20, 4: 60, 5: 200 },
+    NECRONOMICON: { 3: 30, 4: 100, 5: 400 },
+    STATUE: { 3: 50, 4: 200, 5: 1000 }
+  };
+  const SLOT_SCATTER_REWARDS = {
+    3: { spins: 5, instantMult: 2 },
+    4: { spins: 8, instantMult: 5 },
+    5: { spins: 12, instantMult: 20 }
+  };
+
+  function slotRandomSymbol() {
+    let r = Math.random() * 120;
+    for (let i = 0; i < SLOT_WEIGHT_LIST.length; i++) {
+      r -= SLOT_WEIGHT_LIST[i].weight;
+      if (r < 0) return SLOT_WEIGHT_LIST[i].symbol;
+    }
+    return 'PARCHMENT';
+  }
+
+  function slotGenerateGrid() {
+    const grid = [];
+    for (let r = 0; r < 3; r++) {
+      const row = [];
+      for (let c = 0; c < 5; c++) {
+        row.push(slotRandomSymbol());
+      }
+      grid.push(row);
+    }
+    return grid;
+  }
+
+  function slotEvaluateGrid(grid, lineBet, isFreeSpin = false) {
+    const winLines = [];
+    let linePayoutTotal = 0;
+    for (let i = 0; i < SLOT_PAYLINES.length; i++) {
+      const pl = SLOT_PAYLINES[i];
+      let target = null;
+      for (let c = 0; c < 5; c++) {
+        const sym = grid[pl.path[c]][c];
+        if (sym !== 'WILD') {
+          target = sym;
+          break;
+        }
+      }
+      if (!target) target = 'STATUE';
+      if (target === 'SCATTER') continue;
+
+      let matchCount = 0;
+      const positions = [];
+      for (let c = 0; c < 5; c++) {
+        const sym = grid[pl.path[c]][c];
+        if (sym === target || sym === 'WILD') {
+          matchCount++;
+          positions.push([c, pl.path[c]]);
+        } else {
+          break;
+        }
+      }
+
+      if (matchCount >= 3 && SLOT_PAYTABLE[target] && SLOT_PAYTABLE[target][matchCount]) {
+        let mult = SLOT_PAYTABLE[target][matchCount];
+        if (isFreeSpin) mult *= 2;
+        const payout = mult * lineBet;
+        linePayoutTotal += payout;
+        winLines.push({
+          lineIndex: pl.id,
+          lineName: pl.name,
+          symbol: target,
+          count: matchCount,
+          multiplier: mult,
+          payout: payout,
+          positions: positions
+        });
+      }
+    }
+
+    const scatters = [];
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 5; c++) {
+        if (grid[r][c] === 'SCATTER') {
+          scatters.push([c, r]);
+        }
+      }
+    }
+
+    return { winLines, linePayoutTotal, scatters };
+  }
+
+  function slotSpin(actualBet, lineBet, autoExecuteFreeSpins = true) {
+    const baseGrid = slotGenerateGrid();
+    const baseEval = slotEvaluateGrid(baseGrid, lineBet, false);
+
+    let totalPayout = baseEval.linePayoutTotal;
+    let freeSpinsInfo = null;
+
+    if (baseEval.scatters.length >= 3) {
+      const sCount = Math.min(5, baseEval.scatters.length);
+      const reward = SLOT_SCATTER_REWARDS[sCount] || { spins: 5, instantMult: 2 };
+      const instantPay = reward.instantMult * actualBet;
+      totalPayout += instantPay;
+
+      if (autoExecuteFreeSpins) {
+        let remainingSpins = reward.spins;
+        let totalSpinsExecuted = 0;
+        let fsPayoutTotal = 0;
+        const fsSpinsDetails = [];
+
+        while (remainingSpins > 0 && totalSpinsExecuted < 50) {
+          remainingSpins--;
+          totalSpinsExecuted++;
+          const fsGrid = slotGenerateGrid();
+          const fsEval = slotEvaluateGrid(fsGrid, lineBet, true);
+          fsPayoutTotal += fsEval.linePayoutTotal;
+
+          if (fsEval.scatters.length >= 3) {
+            const retriggerCount = Math.min(5, fsEval.scatters.length);
+            const retriggerReward = SLOT_SCATTER_REWARDS[retriggerCount] || { spins: 5, instantMult: 2 };
+            const retriggerInstant = retriggerReward.instantMult * actualBet;
+            fsPayoutTotal += retriggerInstant;
+            remainingSpins = Math.min(50, remainingSpins + retriggerReward.spins);
+          }
+
+          fsSpinsDetails.push({
+            spinIndex: totalSpinsExecuted,
+            winLines: fsEval.winLines,
+            payout: fsEval.linePayoutTotal
+          });
+        }
+
+        totalPayout += fsPayoutTotal;
+        freeSpinsInfo = {
+          triggered: true,
+          count: totalSpinsExecuted,
+          multiplier: 2,
+          instantPay: instantPay,
+          totalWon: instantPay + fsPayoutTotal,
+          spinsDetails: fsSpinsDetails,
+          manualMode: false
+        };
+      } else {
+        freeSpinsInfo = {
+          triggered: true,
+          count: reward.spins,
+          multiplier: 2,
+          instantPay: instantPay,
+          totalWon: instantPay,
+          manualMode: true,
+          spinsDetails: []
+        };
+      }
+    }
+
+    return {
+      grid: baseGrid,
+      winLines: baseEval.winLines,
+      scatters: baseEval.scatters,
+      actualBet,
+      lineBet,
+      totalPayout,
+      netProfit: totalPayout - actualBet,
+      freeSpins: freeSpinsInfo
+    };
+  }
+
+  function slotFlavorQuote(payout, bet, freeSpins) {
+    if (freeSpins && freeSpins.triggered) {
+      return '不可名状的狂欢撕裂了虚空，面具下的旧日低语在深海回响！';
+    }
+    if (payout >= bet * 50) {
+      return '群星归位！沉睡的拉莱耶之神向你投来永恒的凝视与巨额财富！';
+    }
+    if (payout >= bet * 10) {
+      return '禁忌的秘契在此刻显现，古老神像散发出耀眼而诡谲的光芒！';
+    }
+    if (payout > bet) {
+      return '幽绿的卷轴缓缓停驻，深渊的指针带来了一缕清醒的战利品。';
+    }
+    if (payout === bet) {
+      return '齿轮归于平衡，理智与疯狂在微弱的涟漪中暂时休战。';
+    }
+    return '深海的漩涡吞噬了押注，不可名状的低语在耳边窃窃私语...';
+  }
+
+  function slotView(spinResult, p, quote) {
+    const isFree = Boolean(spinResult.isFreeSpin || (spinResult.freeSpins && spinResult.freeSpins.isFreeSpin));
+    const fs = spinResult.freeSpins;
+    const slotScene = {
+      grid: spinResult.grid,
+      winLines: spinResult.winLines,
+      scatters: spinResult.scatters,
+      bet: spinResult.actualBet,
+      lineBet: spinResult.lineBet,
+      totalPayout: spinResult.totalPayout,
+      netProfit: spinResult.netProfit,
+      affectionDelta: spinResult.affectionDelta,
+      freeSpins: spinResult.freeSpins,
+      isFreeSpin: isFree,
+      playerName: p.name,
+      quote: quote
+    };
+    const meters = [
+      { label: '本轮奖金', value: spinResult.totalPayout, min: 0, max: Math.max(spinResult.actualBet * 50, spinResult.totalPayout, 1), text: `${spinResult.totalPayout} 游戏币` },
+      { label: isFree ? '狂欢累计' : '净收益', value: Math.max(0, isFree && fs ? fs.totalWon : spinResult.netProfit), min: 0, max: Math.max(spinResult.actualBet * 50, spinResult.totalPayout, 1), text: `${isFree && fs ? fs.totalWon : (spinResult.netProfit >= 0 ? '+' : '') + spinResult.netProfit} 币` }
+    ];
+    const lines = [];
+    if (isFree && fs) {
+      lines.push(`【免费旋转狂欢 · 第 ${fs.current}/${fs.total} 轮】玩家：${p.name}`);
+      lines.push(`押注：免费（锁定注额 ${spinResult.actualBet} 币 · 单线 ${spinResult.lineBet} 币 · 全线派彩 ×2）`);
+      lines.push(`本轮收益：${spinResult.totalPayout} 游戏币  |  狂欢累计赢得：${fs.totalWon} 游戏币  |  剩余次数：${fs.remaining} 次`);
+    } else {
+      lines.push(`玩家：${p.name}  |  总押注：${spinResult.actualBet} 币（单线 ${spinResult.lineBet} 币 x 20线）`);
+      lines.push(`本轮收益：${spinResult.totalPayout} 游戏币（净收益 ${spinResult.netProfit >= 0 ? '+' : ''}${spinResult.netProfit} 币）`);
+    }
+    lines.push(spinResult.affectionDelta > 0 ? `好感度结算：提升了 ${spinResult.affectionDelta} 点好感` : spinResult.affectionDelta < 0 ? `好感度结算：下降了 ${Math.abs(spinResult.affectionDelta)} 点好感` : '好感度结算：好感无变化');
+    if (spinResult.winLines.length) {
+      lines.push(`命中连线（${spinResult.winLines.length}条${isFree ? ' · 奖金已翻倍' : ''}）：`);
+      spinResult.winLines.slice(0, 4).forEach((wl) => {
+        lines.push(`· 线路 #${wl.lineIndex} [${wl.lineName}]: ${SLOT_SYMBOL_NAMES[wl.symbol] || wl.symbol} ${wl.count}连 (x${wl.multiplier}) → ${wl.payout} 币`);
+      });
+      if (spinResult.winLines.length > 4) lines.push(`... 及另外 ${spinResult.winLines.length - 4} 条连线`);
+    } else {
+      lines.push(isFree ? '本轮未命中有效连线（免费轮不消耗游戏币）。' : '未命中任何有效连线。');
+    }
+    if (!isFree && fs && fs.triggered) {
+      if (fs.manualMode) {
+        lines.push(`【SCATTER 狂欢唤醒】全盘触发 ${spinResult.scatters.length} 个面具！获得 ${fs.instantPay} 币即时奖，并赢得 ${fs.count} 次免费旋转！下注额锁定为 ${spinResult.actualBet} 币，请发送“.老虎机”逐轮摇奖！`);
+      } else {
+        lines.push(`【SCATTER 狂欢】全盘触发 ${spinResult.scatters.length} 个面具！获得 ${fs.instantPay} 币即时奖与 ${fs.count} 次 2倍免费旋转（狂欢共赚得 ${fs.totalWon} 币）！`);
+      }
+    }
+    if (isFree && fs && fs.retriggered) {
+      lines.push(`【SCATTER 狂欢延长】全盘再次出现 ${fs.retriggered.count} 个面具！追加 ${fs.retriggered.addedSpins} 次免费旋转与 ${fs.retriggered.instantPay} 游戏币！`);
+    }
+    if (isFree && fs && fs.isFinished) {
+      lines.push(`【狂欢圆满落幕】全部 ${fs.total} 轮免费旋转结束，累计斩获 ${fs.totalWon} 游戏币！`);
+    }
+    lines.push(`当前游戏币余额：${p.coins} 币  |  好感度：${p.affection}（${relation(p.affection).name}）`);
+    return {
+      kind: 'slot',
+      title: isFree ? `拉莱耶之轮 · 免费狂欢 (${fs.current}/${fs.total})` : '旧日连线：拉莱耶之轮',
+      subtitle: isFree ? `剩余 ${fs.remaining} 次免费旋转 · 全线派彩 ×2` : '20线全押 · 免费旋转倍率 ×2',
+      slotScene,
+      slotFreeSpin: p.slotFreeSpin,
+      meters,
+      lines,
+      quote: quote || slotFlavorQuote(spinResult.totalPayout, spinResult.actualBet, spinResult.freeSpins)
+    };
+  }
+
+  function slotRulesView(pageValue, p) {
+    const pages = [
+      {
+        title: '拉莱耶之轮 · 玩法与机制教程',
+        subtitle: '第 1/2 页 · 发送“.老虎机 规则 2”查看完整赔率表',
+        layout: 'cards',
+        entries: [
+          { title: '5x3卷轴与20线', description: '固定激活20条派彩线，单线注额 = 总押注/20。相同符号自第1列起从左向右连续3/4/5个连线即中奖。', tag: '基础 1' },
+          { title: '百搭 WILD 裂隙', description: '时空裂隙可替代除 SCATTER 外任意普通符号。5连全WILD独享最高 2000x 单线巨奖！', tag: '特性 2' },
+          { title: '分散 SCATTER 面具', description: '奈亚面具不受赔付线限制，全盘出现3/4/5个触发5/8/12次免费旋转与即时总注翻倍！', tag: '狂欢 3' },
+          { title: '免费狂欢奖金翻倍', description: '免费旋转期间所有中奖派彩翻倍（x2倍），狂欢中再次出现3+面具可继续叠加免费次数！', tag: '翻倍 4' },
+          { title: '好感度阶梯结算', description: '中奖根据盈利倍数提升好感（大奖与狂欢额外加成），未中奖按投入档位扣除好感（-1~-8点）。', tag: '好感 5' },
+          { title: '押注范围与指令', description: '单局押注 20~1000 游戏币（默认20）。发送“.老虎机 [金额]”或点击下方按钮即刻开转！', tag: '操作 6' }
+        ],
+        quote: '理论返奖率(RTP)经一百万次蒙特卡洛测试校准为95.0%（中等方差）。'
+      },
+      {
+        title: '拉莱耶之轮 · 完整赔率表',
+        subtitle: '第 2/2 页 · 发送“.老虎机 规则 1”返回玩法规则',
+        layout: 'table',
+        columns: [
+          { title: '符号类别', width: 100 },
+          { title: '符号名称', width: 140 },
+          { title: '3连倍率', width: 85 },
+          { title: '4连倍率', width: 85 },
+          { title: '5连倍率', width: 85 },
+          { title: '符号特性与机制说明', width: 270 }
+        ],
+        rows: [
+          ['金像 (特高)', '拉莱耶纯金神像', '50x', '200x', '1000x', '深海最高价值古神金像，满线爆奖核心'],
+          ['典籍 (高赔)', '死灵之书残页', '30x', '100x', '400x', '禁忌高阶卷宗，仅次于金像的高赔符号'],
+          ['复眼 (中高)', '修格斯复眼', '20x', '60x', '200x', '无定形原生质潜伏异怪，中高连线回报'],
+          ['旧印 (中赔)', '旧印石雕', '10x', '30x', '100x', '庇护古印石板，稳定中赔符号'],
+          ['药剂 (中低)', '可疑发光药剂', '10x', '25x', '80x', '泛着幽光的神秘萃取液'],
+          ['左轮 (低赔)', '调查员左轮', '5x', '20x', '60x', '自卫武器，高频出现的普通符号'],
+          ['残卷 (基础)', '古旧羊皮纸', '5x', '15x', '50x', '泛黄古籍碎片，最高出现率的基础符号'],
+          ['WILD (百搭)', '时空裂隙', '100x', '500x', '2000x', '可替除SCATTER外任意符号；全WILD单线2000x'],
+          ['SCATTER (分散)', '奈亚面具', '2x总注', '5x总注', '20x总注', '全盘3/4/5个触发5/8/12次免费狂欢(奖金翻倍)']
+        ],
+        quote: '免费旋转期间所有普通中奖派彩翻倍（x2倍）；SCATTER即时奖不翻倍。'
+      }
+    ];
+    const page = tutorialPage(pageValue, pages.length);
+    const curr = pages[page - 1];
+    const lines = [
+      `【${curr.title}】（第 ${page}/${pages.length} 页）`,
+      curr.subtitle,
+      '------------------------',
+      '【玩法与机制】',
+      '· 5x3卷轴与20线：固定激活20条派彩线，单线注额 = 总押注/20。从第1列起连续3/4/5连线即中奖。',
+      '· WILD 时空裂隙：百搭符号，可替代除 SCATTER 外任意符号；5连全WILD单线2000x！',
+      '· SCATTER 奈亚面具：全盘出现3/4/5个触发5/8/12次免费旋转与即时总注翻倍！',
+      '· 免费狂欢：免费旋转期间所有普通连线奖金全部翻倍（x2倍）！',
+      '· 好感度结算：盈利增加好感，未中奖按投入档位扣除好感（-1~-8点）。',
+      '【符号赔率（3连 / 4连 / 5连）】',
+      '· 📜 古旧羊皮纸：5x / 15x / 50x',
+      '· 🔫 调查员左轮：5x / 20x / 60x',
+      '· 🧪 可疑发光药剂：10x / 25x / 80x',
+      '· ⭐ 旧印石雕：10x / 30x / 100x',
+      '· 👁️ 修格斯复眼：20x / 60x / 200x',
+      '· 📖 死灵之书残页：30x / 100x / 400x',
+      '· 🐙 拉莱耶金雕像：50x / 200x / 1000x',
+      '· 🌌 WILD（时空裂隙）：100x / 500x / 2000x',
+      '· 🎭 SCATTER（奈亚面具）：2x / 5x / 20x 总注 + 5/8/12次免费狂欢',
+      '------------------------',
+      `【说明】${curr.quote}`
+    ];
+    const tutorialObj = {
+      page,
+      total: pages.length,
+      layout: curr.layout
+    };
+    if (curr.layout === 'cards') tutorialObj.entries = curr.entries;
+    if (curr.layout === 'table') {
+      tutorialObj.columns = curr.columns;
+      tutorialObj.rows = curr.rows;
+    }
+    return {
+      kind: 'slot',
+      title: curr.title,
+      subtitle: curr.subtitle,
+      tutorial: tutorialObj,
+      lines,
+      quote: curr.quote
     };
   }
 
@@ -7225,6 +7632,8 @@
       { label: '累计猎场回合', value: s.bountyRounds, tone: 'neutral' }
     );
     if (game === 'scratch') tiles.push(
+      { label: '拉莱耶之轮 局 / 胜', value: `${s.slotPlays || 0} / ${s.slotWins || 0}`, tone: 'positive' },
+      { label: '拉莱耶之轮 奖金 / 狂欢', value: `${s.slotPrize || 0} / ${s.slotFreeSpins || 0}次`, tone: 'accent' },
       { label: '双色球 注 / 中', value: `${s.lotteryTickets} / ${s.lotteryWins}`, tone: 'positive' },
       { label: '双色球 奖金 / 最高', value: `${s.lotteryPrize} / ${s.lotteryBestPrize}`, tone: 'accent' },
       { label: '生死骰 局 / 胜 / 净收益', value: `${s.deathDicePlays} / ${s.deathDiceWins} / ${signedValue(s.deathDiceProfit)}`, tone: s.deathDiceProfit >= 0 ? 'positive' : 'negative' },
@@ -7337,6 +7746,7 @@
       lines.push(`项目游戏币净收益 ${s.profit || 0}  |  物品库存 ${Object.keys(d.inventory || {}).map((k) => `${k}×${d.inventory[k]}`).join('、') || '无'}`);
     }
     if (game === 'scratch') {
+      lines.push(`拉莱耶之轮 ${s.slotPlays || 0}局 / ${s.slotWins || 0}胜  |  累计收益 ${s.slotPrize || 0}  |  单局最高 ${s.slotBestPrize || 0}  |  免费狂欢 ${s.slotFreeSpins || 0}次`);
       lines.push(`双色球 ${s.lotteryTickets}注 / ${s.lotteryWins}次中奖  |  累计奖金 ${s.lotteryPrize}  |  最高 ${s.lotteryBestPrize}`);
       lines.push(`生死骰 ${s.deathDicePlays}局 ${s.deathDiceWins}胜/${s.deathDiceLosses}负  |  净收益 ${signedValue(s.deathDiceProfit)}  |  单次最高净赢 ${s.deathDiceBestWin}`);
       lines.push(`视频扑克 ${s.videoPokerPlays}局 / ${s.videoPokerHands}手 / ${s.videoPokerHandsWon}手中奖  |  投入 ${s.videoPokerWagered}  |  实收 ${s.videoPokerWon}`);
@@ -9739,6 +10149,7 @@
 
   async function handleScratch(ctx, msg, args) {
     const id = uid(ctx, msg); const name = uname(ctx, msg); const key = scratchTicketKey(id); const op = String(args[0] || '帮助').toLowerCase();
+    if (['老虎机', '拉莱耶', '拉莱耶之轮', 'slot', 'slots'].indexOf(op) >= 0) return handleSlot(ctx, msg, args.slice(1));
     if (['扑克', '视频扑克', 'videopoker', 'video'].indexOf(op) >= 0) return handleVideoPoker(ctx, msg, args.slice(1));
     if (['双色球', 'lottery'].indexOf(op) >= 0) return handleLottery(ctx, msg, args.slice(1));
     if (['生死骰', 'deathdice'].indexOf(op) >= 0) return handleDeathDice(ctx, msg, args.slice(1));
@@ -9842,6 +10253,197 @@
       ? template(ctx, '文案_生死骰生还', { name, prize: payout, entry: stake })
       : template(ctx, '文案_生死骰死亡', { name, prize: 0, entry: stake });
     return replyView(ctx, msg, deathDiceView('result', difficulty, { stake, roll, survived, payout, quote }, p, settlement));
+  }
+
+  async function handleSlot(ctx, msg, args) {
+    const id = uid(ctx, msg);
+    const name = uname(ctx, msg);
+    const p = loadProfile(id, name);
+    const op = String(args[0] || '').trim().toLowerCase();
+
+    if (['帮助', 'help', '规则', 'rule', 'rules', '赔率', 'paytable', '教程', 'tutorial'].indexOf(op) >= 0) {
+      let page = args[1];
+      if (!page && (op === '赔率' || op === 'paytable')) page = 2;
+      return replyView(ctx, msg, slotRulesView(page, p));
+    }
+
+    const skipFreeSpins = seal.ext.getBoolConfig(ext, '老虎机跳过免费轮转盘');
+
+    // 1. 若玩家处于未完成的手动免费旋转狂欢中，直接执行免费轮摇奖
+    if (p.slotFreeSpin && p.slotFreeSpin.remaining > 0) {
+      const fsSession = p.slotFreeSpin;
+      const actualBet = fsSession.lockedBet;
+      const lineBet = fsSession.lineBet;
+
+      // 免费轮摇奖：注额锁定在触发狂欢时的金额，派彩倍率 x2，不扣除任何游戏币
+      const fsGrid = slotGenerateGrid();
+      const fsEval = slotEvaluateGrid(fsGrid, lineBet, true);
+      let fsPayout = fsEval.linePayoutTotal;
+
+      // 检查免费轮中是否再次命中 SCATTER 面具 (Retrigger)
+      let retriggerInfo = null;
+      if (fsEval.scatters.length >= 3) {
+        const retriggerCount = Math.min(5, fsEval.scatters.length);
+        const retriggerReward = SLOT_SCATTER_REWARDS[retriggerCount] || { spins: 5, instantMult: 2 };
+        const retriggerInstant = retriggerReward.instantMult * actualBet;
+        fsPayout += retriggerInstant;
+        fsSession.remaining = Math.min(50, fsSession.remaining + retriggerReward.spins);
+        fsSession.totalSpins += retriggerReward.spins;
+        retriggerInfo = {
+          count: retriggerCount,
+          addedSpins: retriggerReward.spins,
+          instantPay: retriggerInstant
+        };
+      }
+
+      fsSession.remaining--;
+      fsSession.currentSpin++;
+      fsSession.totalWon += fsPayout;
+      p.coins += fsPayout;
+
+      // 好感度结算：免费轮成本为0，不亏损，绝不扣除好感！中奖按派彩金额提升好感
+      let delta = 0;
+      if (fsPayout > 0) {
+        delta = fsPayout >= actualBet * 20 ? 6
+          : fsPayout >= actualBet * 5 ? 3
+          : fsPayout >= actualBet * 2 ? 2 : 1;
+        if (retriggerInfo) delta += 2;
+      }
+      if (delta !== 0) changeAffection(p, delta);
+
+      const s = p.stats.scratch;
+      s.slotPlays = (s.slotPlays || 0) + 1;
+      s.slotPrize = (s.slotPrize || 0) + fsPayout;
+      if (fsPayout > 0) s.slotWins = (s.slotWins || 0) + 1;
+      s.slotBestPrize = Math.max(s.slotBestPrize || 0, fsPayout);
+      s.slotFreeSpins = (s.slotFreeSpins || 0) + 1;
+
+      const isFinished = fsSession.remaining <= 0;
+      const sessionSnapshot = {
+        isFreeSpin: true,
+        current: fsSession.currentSpin,
+        total: fsSession.totalSpins,
+        remaining: fsSession.remaining,
+        totalWon: fsSession.totalWon,
+        lockedBet: actualBet,
+        lineBet: lineBet,
+        isFinished,
+        retriggered: retriggerInfo
+      };
+
+      if (isFinished) {
+        delete p.slotFreeSpin;
+      }
+      saveProfile(p);
+
+      const spinResult = {
+        grid: fsGrid,
+        winLines: fsEval.winLines,
+        scatters: fsEval.scatters,
+        actualBet: actualBet,
+        lineBet: lineBet,
+        totalPayout: fsPayout,
+        netProfit: fsPayout,
+        affectionDelta: delta,
+        isFreeSpin: true,
+        freeSpins: sessionSnapshot
+      };
+
+      let quote = '';
+      const deltaStr = delta > 0 ? `好感度提升了 ${delta} 点` : '好感度无变化';
+      if (retriggerInfo) {
+        quote = `🎉【SCATTER 狂欢延长】全盘再次出现 ${retriggerInfo.count} 个面具！追加 ${retriggerInfo.addedSpins} 次免费旋转与 ${retriggerInfo.instantPay} 币！本轮共得 ${fsPayout} 币，${deltaStr}！`;
+      } else if (isFinished) {
+        quote = `🎊【免费旋转狂欢落幕】共完成 ${sessionSnapshot.total} 轮免费旋转，累计斩获 ${sessionSnapshot.totalWon} 游戏币！${deltaStr}。`;
+      } else if (fsPayout > 0) {
+        quote = `🔥【免费旋转 第 ${sessionSnapshot.current}/${sessionSnapshot.total} 轮】获得 ${fsPayout} 游戏币（累计赢得 ${sessionSnapshot.totalWon} 币，剩余 ${sessionSnapshot.remaining} 次），${deltaStr}！`;
+      } else {
+        quote = `🌊【免费旋转 第 ${sessionSnapshot.current}/${sessionSnapshot.total} 轮】本轮未命中（锁定注额 ${actualBet} 币，剩余 ${sessionSnapshot.remaining} 次），狂欢累计 ${sessionSnapshot.totalWon} 币。`;
+      }
+
+      return replyView(ctx, msg, slotView(spinResult, p, quote));
+    }
+
+    // 2. 常规下注摇奖轮 (Base Game)
+    const requestedBet = args[0] !== undefined && args[0] !== '' ? int(args[0], 20) : 20;
+    const clampedBet = clamp(requestedBet, 20, 1000);
+    const lineBet = Math.max(1, Math.floor(clampedBet / 20));
+    const actualBet = lineBet * 20;
+
+    if (p.coins < actualBet) {
+      return replyView(ctx, msg, {
+        kind: 'slot',
+        title: '拉莱耶之轮 · 余额不足',
+        lines: [
+          `本次押注需要 ${actualBet} 游戏币（单线 ${lineBet} 币 x 20线）`,
+          `当前持有游戏币：${p.coins} 币`,
+          '可通过每日签到、智力打工、胜场奖励或借款获取资金。'
+        ],
+        quote: template(ctx, '文案_余额不足', { name })
+      });
+    }
+
+    charge(p, actualBet);
+    videoPokerFundJackpot(actualBet);
+
+    const spinResult = slotSpin(actualBet, lineBet, skipFreeSpins);
+    p.coins += spinResult.totalPayout;
+
+    // 若关闭了跳过免费轮转盘，且本轮唤醒了免费狂欢，为玩家建立手动免费旋转会话
+    if (!skipFreeSpins && spinResult.freeSpins && spinResult.freeSpins.triggered && spinResult.freeSpins.manualMode) {
+      p.slotFreeSpin = {
+        remaining: spinResult.freeSpins.count,
+        totalSpins: spinResult.freeSpins.count,
+        currentSpin: 0,
+        lockedBet: actualBet,
+        lineBet: lineBet,
+        totalWon: 0
+      };
+    }
+
+    let delta = 0;
+    if (spinResult.totalPayout > actualBet) {
+      delta = spinResult.totalPayout >= actualBet * 20 ? 6
+        : spinResult.totalPayout >= actualBet * 5 ? 3
+        : spinResult.totalPayout >= actualBet * 2 ? 2 : 1;
+      if (spinResult.freeSpins && spinResult.freeSpins.triggered) delta += 2;
+    } else if (spinResult.totalPayout === actualBet) {
+      delta = 0;
+    } else {
+      delta = stakeFailureAffection(actualBet);
+    }
+
+    spinResult.affectionDelta = delta;
+    if (delta !== 0) changeAffection(p, delta);
+    else saveProfile(p);
+
+    const resultStatus = spinResult.totalPayout > actualBet ? 'win' : spinResult.totalPayout === actualBet ? 'draw' : 'loss';
+    recordGame(p, 'scratch', resultStatus, spinResult.totalPayout, spinResult.netProfit, { affectionDelta: delta });
+
+    const s = p.stats.scratch;
+    s.slotPlays = (s.slotPlays || 0) + 1;
+    s.slotBet = (s.slotBet || 0) + actualBet;
+    s.slotPrize = (s.slotPrize || 0) + spinResult.totalPayout;
+    if (spinResult.totalPayout > actualBet) s.slotWins = (s.slotWins || 0) + 1;
+    s.slotBestPrize = Math.max(s.slotBestPrize || 0, spinResult.totalPayout);
+    if (spinResult.freeSpins && spinResult.freeSpins.triggered) s.slotFreeSpins = (s.slotFreeSpins || 0) + 1;
+
+    saveProfile(p);
+
+    const deltaStr = delta > 0 ? `好感度提升了 ${delta} 点`
+      : delta < 0 ? `好感度下降了 ${Math.abs(delta)} 点`
+      : '好感度无变化';
+
+    let quote = '';
+    if (!skipFreeSpins && spinResult.freeSpins && spinResult.freeSpins.triggered) {
+      quote = `🎉【SCATTER 狂欢唤醒】全盘出现 ${spinResult.scatters.length} 个面具！获得 ${spinResult.freeSpins.instantPay} 币即时奖，并赢得 ${spinResult.freeSpins.count} 次免费旋转！下注额锁定为 ${actualBet} 币，请发送“.老虎机”或点击下方按钮开启摇奖！`;
+    } else if (spinResult.totalPayout > 0) {
+      quote = `【结算】${name} 获得了 ${spinResult.totalPayout} 游戏币（净收益 ${spinResult.netProfit >= 0 ? '+' : ''}${spinResult.netProfit} 币），${deltaStr}！`;
+    } else {
+      quote = `【结算】${name} 未命中连线，损失了 ${actualBet} 游戏币，${deltaStr}。`;
+    }
+
+    return replyView(ctx, msg, slotView(spinResult, p, quote));
   }
 
   async function handleLandlord(ctx, msg, args, cmdArgs) {
@@ -11216,6 +11818,7 @@
       '.赏金 人机/开房/加入/开始  |  .赏金 行动 移动C4|侦查  |  .赏金 私图',
       '.赏金 仓库 / 武器 / 道具 / 技能 / 教程  |  先配装再进图；单局40回合，13×13地图，携赏金撤离',
       '.刮刮 买 [面额] [类型]  |  .刮刮 刮开',
+      '.老虎机 [金额]  |  .拉莱耶之轮 5x3克苏鲁连线，20线全押，免费旋转倍率×2',
       '.视频扑克 10/30/50  |  .刮刮 扑克 10/30/50',
       '.双色球 [5红+1蓝] xN / 机选N / 批量多组  |  同组倍投只显示一行xN',
       '.双色球 状态/历史/兑奖结果 [页码]  |  每日18:00开奖，兑奖期限1天',
@@ -11245,7 +11848,8 @@
     '爱赢一切': '爱赢一切', '爱赢': '爱赢一切', 'love': '爱赢一切', '炼金': '炼金', '魔幻牌': '炼金', '魔幻牌炼金术师': '炼金', 'alchemy': '炼金',
     '古墓': '古墓', '古墓夺宝': '古墓', '摸金': '古墓', 'tomb': '古墓',
     '赏金': '赏金', '赏金对决': '赏金', '赏金行动': '赏金', 'bounty': '赏金',
-    '刮刮': '刮刮', '刮刮乐': '刮刮', '视频扑克': '视频扑克', 'videopoker': '视频扑克', '钓鱼': '钓鱼', '钓鱼牌': '钓鱼牌', '捕鱼牌': '钓鱼牌', 'fishingcard': '钓鱼牌', '竞拍': '竞拍', '竞拍之王': '竞拍',
+    '刮刮': '刮刮', '刮刮乐': '刮刮', '老虎机': '老虎机', '拉莱耶': '老虎机', '拉莱耶之轮': '老虎机', 'slot': '老虎机', 'slots': '老虎机',
+    '视频扑克': '视频扑克', 'videopoker': '视频扑克', '钓鱼': '钓鱼', '钓鱼牌': '钓鱼牌', '捕鱼牌': '钓鱼牌', 'fishingcard': '钓鱼牌', '竞拍': '竞拍', '竞拍之王': '竞拍',
     '双色球': '双色球', '生死骰': '生死骰', '借款': '借款', '斗地主': '斗地主', 'landlord': '斗地主', '斗地': '斗地主',
     '排行': '排行', '排行榜': '排行', '好感榜': '排行', '打工': '打工', '智力打工': '打工', 'work': '打工'
   };
@@ -11277,6 +11881,7 @@
       else if (section === '古墓' || section === '古墓夺宝' || section === '摸金' || section.toLowerCase() === 'tomb') await handleTomb(ctx, msg, args);
       else if (section === '赏金' || section === '赏金对决' || section.toLowerCase() === 'bounty') await handleBounty(ctx, msg, args, cmdArgs);
       else if (section === '刮刮' || section === '刮刮乐') await handleScratch(ctx, msg, args);
+      else if (section === '老虎机') await handleSlot(ctx, msg, args);
       else if (section === '视频扑克') await handleVideoPoker(ctx, msg, args);
       else if (section === '双色球') await handleLottery(ctx, msg, args);
       else if (section === '生死骰') await handleDeathDice(ctx, msg, args);

@@ -8,6 +8,7 @@ let canvasApi;
 try { canvasApi = require('@napi-rs/canvas'); }
 catch (error) { canvasApi = require('canvas'); }
 const { createCanvas, loadImage } = canvasApi;
+const { GifEncoder } = require('./gif-encoder');
 
 const PORT = Math.max(1, Math.min(65535, Number.parseInt(process.env.AFFECTION_RENDER_PORT || '3891', 10)));
 const HOST = process.env.AFFECTION_RENDER_HOST || '127.0.0.1';
@@ -40,15 +41,15 @@ function pruneRenderedImages(now = Date.now()) {
   }
 }
 
-function storeRenderedImage(buffer) {
+function storeRenderedImage(buffer, mime = 'image/png') {
   pruneRenderedImages();
   const id = crypto.randomBytes(12).toString('hex');
-  renderedImages.set(id, { buffer, expiresAt: Date.now() + RENDER_TTL_MS });
+  renderedImages.set(id, { buffer, mime, expiresAt: Date.now() + RENDER_TTL_MS });
   return id;
 }
 
 function backgroundFor(kind) {
-  if (['poker', 'blackjack', 'dmd', 'love', 'videoPoker', 'demon', 'fourKnife'].includes(kind)) return BACKGROUNDS.casino;
+  if (['poker', 'blackjack', 'dmd', 'love', 'videoPoker', 'demon', 'fourKnife', 'slot', '老虎机'].includes(kind)) return BACKGROUNDS.casino;
   if (kind === 'fishing') return BACKGROUNDS.fishing;
   if (kind === 'fishingCard' || kind === '钓鱼牌') return BACKGROUNDS.fishing;
   if (kind === 'auction') return BACKGROUNDS.auction;
@@ -60,6 +61,7 @@ function backgroundFor(kind) {
 
 function accentFor(kind) {
   if (['poker', 'blackjack', 'dmd', 'videoPoker', 'fourKnife'].includes(kind)) return '#f3c969';
+  if (kind === 'slot' || kind === '老虎机') return '#2de296';
   if (kind === 'demon') return '#d84f63';
   if (kind === 'love') return '#7edc9d';
   if (kind === 'fishing') return '#82d5d0';
@@ -328,6 +330,65 @@ function normalizeLotteryDraw(draw) {
   };
 }
 
+function normalizeSlotScene(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const rawGrid = Array.isArray(raw.grid) ? raw.grid : [];
+  const grid = [];
+  for (let r = 0; r < 3; r++) {
+    const row = Array.isArray(rawGrid[r]) ? rawGrid[r] : [];
+    grid.push([
+      sanitizeText(row[0], 24) || 'PARCHMENT',
+      sanitizeText(row[1], 24) || 'PARCHMENT',
+      sanitizeText(row[2], 24) || 'PARCHMENT',
+      sanitizeText(row[3], 24) || 'PARCHMENT',
+      sanitizeText(row[4], 24) || 'PARCHMENT'
+    ]);
+  }
+  const rawWinLines = Array.isArray(raw.winLines) ? raw.winLines : [];
+  const winLines = rawWinLines.slice(0, 20).map((wl) => ({
+    lineIndex: Math.max(1, Math.floor(safeNumber(wl && wl.lineIndex, 1))),
+    lineName: sanitizeText(wl && wl.lineName, 24) || '',
+    symbol: sanitizeText(wl && wl.symbol, 24) || 'PARCHMENT',
+    count: Math.max(3, Math.min(5, Math.floor(safeNumber(wl && wl.count, 3)))),
+    multiplier: Math.max(0, safeNumber(wl && wl.multiplier, 0)),
+    payout: Math.max(0, Math.floor(safeNumber(wl && wl.payout, 0))),
+    positions: (Array.isArray(wl && wl.positions) ? wl.positions : []).slice(0, 5).map((pos) => (
+      Array.isArray(pos) ? [Math.max(0, Math.min(4, Math.floor(safeNumber(pos[0])))), Math.max(0, Math.min(2, Math.floor(safeNumber(pos[1]))))] : [0, 0]
+    ))
+  }));
+  const rawScatters = Array.isArray(raw.scatters) ? raw.scatters : [];
+  const scatters = rawScatters.slice(0, 15).map((pos) => (
+    Array.isArray(pos) ? [Math.max(0, Math.min(4, Math.floor(safeNumber(pos[0])))), Math.max(0, Math.min(2, Math.floor(safeNumber(pos[1]))))] : [0, 0]
+  ));
+  const rawFs = raw.freeSpins && typeof raw.freeSpins === 'object' ? raw.freeSpins : {};
+  const isFreeSpin = Boolean(raw.isFreeSpin || rawFs.isFreeSpin);
+  return {
+    playerName: sanitizeText(raw.playerName, 24) || '调查员',
+    bet: Math.max(0, Math.min(1000, Math.floor(safeNumber(raw.bet, 20)))),
+    lineBet: Math.max(1, Math.floor(safeNumber(raw.lineBet, 1))),
+    totalPayout: Math.max(0, Math.floor(safeNumber(raw.totalPayout, 0))),
+    netProfit: Math.floor(safeNumber(raw.netProfit, 0)),
+    affectionDelta: Math.floor(safeNumber(raw.affectionDelta, 0)),
+    quote: sanitizeText(raw.quote, 200),
+    grid,
+    winLines,
+    scatters,
+    isFreeSpin,
+    freeSpins: {
+      triggered: Boolean(rawFs.triggered),
+      isFreeSpin,
+      current: Math.max(0, Math.floor(safeNumber(rawFs.current, 0))),
+      remaining: Math.max(0, Math.floor(safeNumber(rawFs.remaining, 0))),
+      totalSpins: Math.max(0, Math.floor(safeNumber(rawFs.totalSpins || rawFs.total, 0))),
+      count: Math.max(0, Math.floor(safeNumber(rawFs.count, 0))),
+      multiplier: Math.max(1, Math.floor(safeNumber(rawFs.multiplier, 2))),
+      instantPay: Math.max(0, Math.floor(safeNumber(rawFs.instantPay, 0))),
+      totalWon: Math.max(0, Math.floor(safeNumber(rawFs.totalWon, 0)))
+    },
+    static: Boolean(raw.static)
+  };
+}
+
 function normalizeView(input) {
   const rawLines = Array.isArray(input && input.lines) ? input.lines : [];
   const rawMeters = Array.isArray(input && input.meters) ? input.meters : [];
@@ -359,6 +420,8 @@ function normalizeView(input) {
   const rawWork = input && input.workScene && typeof input.workScene === 'object' ? input.workScene : null;
   const rawAlchemy = input && input.alchemyTable && typeof input.alchemyTable === 'object' ? input.alchemyTable : null;
   const rawFourKnife = input && input.fourKnifeTable && typeof input.fourKnifeTable === 'object' ? input.fourKnifeTable : null;
+  const rawSlot = input && input.slotScene && typeof input.slotScene === 'object' ? input.slotScene
+    : (input && input.slotTable && typeof input.slotTable === 'object' ? input.slotTable : null);
   return {
     kind: sanitizeText(input && input.kind, 32) || 'profile',
     title: sanitizeText(input && input.title, 80) || '骰娘好感度',
@@ -453,6 +516,7 @@ function normalizeView(input) {
         symbol: sanitizeText(cell && cell.symbol, 24), value: Math.max(0, safeNumber(cell && cell.value)), winning: Boolean(cell && cell.winning)
       }))
     } : null,
+    slotScene: rawSlot ? normalizeSlotScene(rawSlot) : null,
     lotteryScene: rawLottery ? {
       mode: ['menu', 'ticket', 'status', 'result', 'history'].includes(rawLottery.mode) ? rawLottery.mode : 'menu',
       issue: sanitizeText(rawLottery.issue, 16), price: Math.max(0, Math.floor(safeNumber(rawLottery.price))),
@@ -1903,6 +1967,491 @@ function drawScratchTicket(ctx, view, accent) {
     ctx.fillText(ticket.affectionDelta < 0 ? `好感 ${Math.floor(ticket.affectionDelta)}` : '票面已经完成核验', 600, y + 693);
   }
   ctx.fillStyle = '#725346'; ctx.font = '14px "Microsoft YaHei", sans-serif'; ctx.fillText(view.quote || '骰娘好感度 · 刮刮乐发行中心', 600, y + 748, 900); ctx.textAlign = 'left';
+}
+
+const SLOT_SYMBOL_NAMES = {
+  PARCHMENT: '古旧羊皮纸',
+  REVOLVER: '左轮手枪',
+  POTION: '可疑药剂',
+  ELDER_SIGN: '旧印石雕',
+  EYE: '修格斯复眼',
+  NECRONOMICON: '死灵之书',
+  STATUE: '拉莱耶金像',
+  WILD: '时空裂隙',
+  SCATTER: '奈亚面具'
+};
+
+const SLOT_SYMBOL_COLORS = {
+  PARCHMENT: '#e2d5b5',
+  REVOLVER: '#94a3b8',
+  POTION: '#34d399',
+  ELDER_SIGN: '#38bdf8',
+  EYE: '#c084fc',
+  NECRONOMICON: '#f87171',
+  STATUE: '#fbbf24',
+  WILD: '#ec4899',
+  SCATTER: '#f43f5e'
+};
+
+const SLOT_ALL_SYMBOLS = ['PARCHMENT', 'REVOLVER', 'POTION', 'ELDER_SIGN', 'EYE', 'NECRONOMICON', 'STATUE', 'WILD', 'SCATTER'];
+
+function drawSlotSymbol(ctx, symbol, cx, cy, size, isHighlight) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  if (isHighlight) {
+    ctx.shadowColor = '#facc15';
+    ctx.shadowBlur = 16;
+  }
+  const s = size / 100;
+  ctx.scale(s, s);
+
+  switch (symbol) {
+    case 'PARCHMENT': {
+      ctx.fillStyle = '#e8d8b5'; ctx.strokeStyle = '#8c6d3b'; ctx.lineWidth = 3;
+      roundedRect(ctx, -32, -38, 64, 76, 6); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#c7ab77';
+      ctx.beginPath(); ctx.ellipse(0, -38, 34, 8, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(0, 38, 34, 8, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = 'rgba(70, 48, 20, 0.65)'; ctx.lineWidth = 2;
+      for (let y = -20; y <= 20; y += 10) {
+        ctx.beginPath(); ctx.moveTo(-22, y); ctx.lineTo(22, y); ctx.stroke();
+      }
+      ctx.fillStyle = '#dc2626'; ctx.beginPath(); ctx.arc(14, 18, 10, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fbbf24'; ctx.beginPath(); ctx.arc(14, 18, 5, 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case 'REVOLVER': {
+      ctx.strokeStyle = '#1e293b'; ctx.lineWidth = 2;
+      ctx.fillStyle = '#94a3b8'; ctx.fillRect(-35, -12, 45, 10); ctx.strokeRect(-35, -12, 45, 10);
+      ctx.fillStyle = '#64748b'; roundedRect(ctx, 10, -18, 22, 22, 4); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#334155'; ctx.fillRect(14, -14, 14, 4); ctx.fillRect(14, -4, 14, 4);
+      ctx.fillStyle = '#475569'; ctx.fillRect(28, -20, 10, 14);
+      ctx.fillStyle = '#92400e'; ctx.beginPath();
+      ctx.moveTo(26, 0); ctx.lineTo(40, 10); ctx.lineTo(34, 38); ctx.lineTo(18, 34); ctx.lineTo(20, 6);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = '#475569'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(16, 12, 10, 0, Math.PI); ctx.stroke();
+      ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(16, 4); ctx.lineTo(14, 14); ctx.stroke();
+      break;
+    }
+    case 'POTION': {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)'; ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(-10, -32); ctx.lineTo(10, -32); ctx.lineTo(10, -15); ctx.lineTo(34, 25);
+      ctx.arcTo(34, 35, 24, 35, 10); ctx.lineTo(-24, 35); ctx.arcTo(-34, 35, -34, 25, 10); ctx.lineTo(-10, -15);
+      ctx.closePath(); ctx.stroke();
+      ctx.fillStyle = '#10b981'; ctx.beginPath();
+      ctx.moveTo(-20, 2); ctx.bezierCurveTo(-10, -4, 10, 8, 20, 2); ctx.lineTo(30, 25);
+      ctx.arcTo(30, 32, 22, 32, 8); ctx.lineTo(-22, 32); ctx.arcTo(-30, 32, -30, 25, 8); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#6ee7b7';
+      ctx.beginPath(); ctx.arc(-8, 12, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(10, 18, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(2, 6, 2.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#b45309'; ctx.fillRect(-8, -40, 16, 10);
+      break;
+    }
+    case 'ELDER_SIGN': {
+      ctx.fillStyle = '#334155'; ctx.strokeStyle = '#64748b'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(0, 0, 38, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = '#38bdf8'; ctx.shadowColor = '#0284c7'; ctx.shadowBlur = 10; ctx.lineWidth = 3.5;
+      ctx.beginPath(); ctx.ellipse(0, 0, 10, 6, 0, 0, Math.PI * 2);
+      ctx.moveTo(0, -3); ctx.lineTo(0, 3);
+      ctx.moveTo(0, -6); ctx.lineTo(0, -30);
+      ctx.moveTo(-4, -18); ctx.lineTo(-14, -26); ctx.moveTo(4, -18); ctx.lineTo(14, -26);
+      ctx.moveTo(8, -2); ctx.lineTo(28, -12); ctx.moveTo(18, -7); ctx.lineTo(24, 4);
+      ctx.moveTo(6, 4); ctx.lineTo(20, 26); ctx.moveTo(12, 16); ctx.lineTo(24, 18);
+      ctx.moveTo(-6, 4); ctx.lineTo(-20, 26); ctx.moveTo(-12, 16); ctx.lineTo(-24, 18);
+      ctx.moveTo(-8, -2); ctx.lineTo(-28, -12); ctx.moveTo(-18, -7); ctx.lineTo(-24, 4);
+      ctx.stroke();
+      break;
+    }
+    case 'EYE': {
+      ctx.fillStyle = '#581c87'; ctx.beginPath(); ctx.ellipse(0, 0, 38, 30, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#6b21a8';
+      ctx.beginPath(); ctx.arc(-30, 15, 10, 0, Math.PI * 2); ctx.arc(30, 12, 12, 0, Math.PI * 2); ctx.arc(0, 30, 11, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fef08a'; ctx.beginPath(); ctx.ellipse(0, 0, 24, 16, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#991b1b'; ctx.beginPath(); ctx.ellipse(0, 0, 6, 16, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fbbf24'; ctx.beginPath(); ctx.arc(-18, -14, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(-18, -14, 2.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fbbf24'; ctx.beginPath(); ctx.arc(18, -12, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(18, -12, 2, 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case 'NECRONOMICON': {
+      ctx.fillStyle = '#7f1d1d'; ctx.strokeStyle = '#450a0a'; ctx.lineWidth = 3;
+      roundedRect(ctx, -32, -38, 64, 76, 5); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#450a0a'; ctx.fillRect(-32, -38, 12, 76);
+      ctx.fillStyle = '#f59e0b';
+      ctx.beginPath(); ctx.moveTo(32, -38); ctx.lineTo(16, -38); ctx.lineTo(32, -22); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(32, 38); ctx.lineTo(16, 38); ctx.lineTo(32, 22); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(4, 0, 16, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#ef4444'; ctx.beginPath(); ctx.arc(4, 0, 6, 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case 'STATUE': {
+      ctx.fillStyle = '#b45309'; ctx.fillRect(-28, 24, 56, 14); ctx.strokeRect(-28, 24, 56, 14);
+      ctx.fillStyle = '#f59e0b'; ctx.strokeStyle = '#78350f'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, -12, 18, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-12, -18); ctx.lineTo(-36, -30); ctx.lineTo(-24, -4); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(12, -18); ctx.lineTo(36, -30); ctx.lineTo(24, -4); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.lineWidth = 3; ctx.strokeStyle = '#f59e0b';
+      for (let offset of [-10, -5, 0, 5, 10]) {
+        ctx.beginPath(); ctx.moveTo(offset, 0); ctx.quadraticCurveTo(offset * 1.8, 14, offset * 1.2, 24); ctx.stroke();
+      }
+      ctx.fillStyle = '#fef08a'; ctx.beginPath(); ctx.arc(-4, -15, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(4, -15, 3, 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case 'WILD': {
+      const grad = ctx.createRadialGradient(0, 0, 5, 0, 0, 38);
+      grad.addColorStop(0, '#f472b6'); grad.addColorStop(0.4, '#a855f7'); grad.addColorStop(0.8, '#3b82f6'); grad.addColorStop(1, '#0f172a');
+      ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(0, 0, 38, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(-14, -12, 2, 0, Math.PI * 2); ctx.arc(18, 16, 2.5, 0, Math.PI * 2); ctx.arc(-16, 18, 1.5, 0, Math.PI * 2); ctx.arc(12, -20, 2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fbbf24'; ctx.strokeStyle = '#000'; ctx.lineWidth = 3; ctx.font = '800 24px "Microsoft YaHei", sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.strokeText('WILD', 0, 0); ctx.fillText('WILD', 0, 0);
+      break;
+    }
+    case 'SCATTER': {
+      ctx.fillStyle = '#1e293b'; ctx.strokeStyle = '#f43f5e'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(0, -38); ctx.bezierCurveTo(28, -38, 32, 0, 20, 24); ctx.lineTo(0, 36); ctx.lineTo(-20, 24); ctx.bezierCurveTo(-32, 0, -28, -38, 0, -38);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#f43f5e';
+      ctx.beginPath(); ctx.ellipse(-10, -6, 7, 4, -0.3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(10, -6, 7, 4, 0.3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fbbf24'; ctx.beginPath(); ctx.arc(0, -22, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fbbf24'; ctx.strokeStyle = '#000'; ctx.lineWidth = 2; ctx.font = '800 13px "Microsoft YaHei", sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.strokeText('SCATTER', 0, 16); ctx.fillText('SCATTER', 0, 16);
+      break;
+    }
+  }
+  ctx.restore();
+}
+
+function drawSlotFrame(ctx, table, frameIndex = 12, isFinal = false) {
+  const width = 1200;
+  const height = 900;
+
+  // Background: Cthulhu Temple dark stone with vignette
+  ctx.fillStyle = '#0a1012';
+  ctx.fillRect(0, 0, width, height);
+
+  const bgGrad = ctx.createRadialGradient(600, 450, 100, 600, 450, 700);
+  bgGrad.addColorStop(0, 'rgba(16, 44, 36, 0.7)');
+  bgGrad.addColorStop(0.6, 'rgba(8, 24, 20, 0.85)');
+  bgGrad.addColorStop(1, 'rgba(3, 10, 8, 0.98)');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, width, height);
+
+  // Outer gold & rune border
+  roundedRect(ctx, 40, 36, 1120, 828, 14);
+  ctx.fillStyle = 'rgba(8, 14, 13, 0.88)';
+  ctx.fill();
+  ctx.strokeStyle = '#c99a3e';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  ctx.fillStyle = '#eab308';
+  ctx.fillRect(40, 36, 16, 16);
+  ctx.fillRect(1144, 36, 16, 16);
+  ctx.fillRect(40, 848, 16, 16);
+  ctx.fillRect(1144, 848, 16, 16);
+
+  // 1. Header
+  ctx.fillStyle = '#fef08a';
+  ctx.font = '800 30px "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('拉莱耶之轮 · WHEEL OF R\'LYEH', 70, 76);
+
+  const isFree = Boolean(table.isFreeSpin || (table.freeSpins && table.freeSpins.isFreeSpin));
+  if (isFree) {
+    ctx.fillStyle = '#fb7185';
+    ctx.font = '700 15px "Microsoft YaHei", sans-serif';
+    ctx.fillText(`【免费旋转狂欢中】（第 ${table.freeSpins.current || 1}/${table.freeSpins.totalSpins || table.freeSpins.count || 1} 轮 · 剩余 ${table.freeSpins.remaining || 0} 次）· 全线派彩 ×2`, 70, 104);
+  } else {
+    ctx.fillStyle = '#5eead4';
+    ctx.font = '700 15px "Microsoft YaHei", sans-serif';
+    ctx.fillText('20线全押 · 克苏鲁神话经典连线 · 免费旋转倍率 ×2', 70, 104);
+  }
+
+  // Info chips at top-right
+  const chips = [
+    { label: '玩家', value: table.playerName || '调查员', color: '#93c5fd' },
+    { label: isFree ? '免费狂欢' : '总押注', value: isFree ? `${table.freeSpins.current || 1}/${table.freeSpins.totalSpins || table.freeSpins.count || 1}` : `${table.bet || 20} 币`, color: isFree ? '#f43f5e' : '#fde047' },
+    { label: '单线注', value: `${table.lineBet || 1} 币`, color: '#cbd5e1' },
+    { label: '中奖', value: `${table.totalPayout || 0} 币`, color: (table.totalPayout > 0 ? '#4ade80' : '#94a3b8') },
+    { label: '好感', value: `${table.affectionDelta >= 0 ? '+' : ''}${table.affectionDelta || 0}`, color: (table.affectionDelta >= 0 ? '#f472b6' : '#94a3b8') }
+  ];
+
+  let chipX = 610;
+  chips.forEach((c) => {
+    roundedRect(ctx, chipX, 56, 102, 54, 6);
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.82)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(201, 154, 62, 0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '12px "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(c.label, chipX + 51, 74);
+
+    ctx.fillStyle = c.color;
+    ctx.font = '700 14px "Microsoft YaHei", sans-serif';
+    ctx.fillText(c.value, chipX + 51, 98);
+    chipX += 108;
+  });
+
+  // 2. Reel Frame Grid: 5 Columns × 3 Rows
+  const gridX = 70;
+  const gridY = 135;
+  const gridW = 1060;
+  const gridH = 500;
+
+  roundedRect(ctx, gridX, gridY, gridW, gridH, 10);
+  ctx.fillStyle = '#050a09';
+  ctx.fill();
+  ctx.strokeStyle = '#374151';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  const highlightMap = new Map();
+  if (frameIndex >= 9 && table.winLines && table.winLines.length) {
+    table.winLines.forEach((wl, idx) => {
+      (wl.positions || []).forEach(([col, row]) => {
+        highlightMap.set(`${col},${row}`, idx);
+      });
+    });
+  }
+  if (frameIndex >= 10 && table.scatters) {
+    table.scatters.forEach(([col, row]) => {
+      highlightMap.set(`${col},${row}`, 99);
+    });
+  }
+
+  const colLocked = [
+    frameIndex >= 4,
+    frameIndex >= 5,
+    frameIndex >= 6,
+    frameIndex >= 7,
+    frameIndex >= 8
+  ];
+
+  const colWidth = 204;
+  const colGap = 8;
+  const rowHeight = 156;
+  const rowGap = 8;
+
+  for (let c = 0; c < 5; c++) {
+    const colX = gridX + 8 + c * (colWidth + colGap);
+    const isLocked = colLocked[c];
+
+    roundedRect(ctx, colX, gridY + 8, colWidth, gridH - 16, 8);
+    ctx.fillStyle = isLocked ? '#0b1414' : '#081a18';
+    ctx.fill();
+    ctx.strokeStyle = isLocked ? '#1f2937' : '#0d9488';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    if (!isLocked) {
+      ctx.save();
+      ctx.rect(colX, gridY + 8, colWidth, gridH - 16);
+      ctx.clip();
+
+      ctx.strokeStyle = 'rgba(45, 226, 150, 0.25)';
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 6; i++) {
+        const lx = colX + 25 + i * 30;
+        ctx.beginPath();
+        ctx.moveTo(lx, gridY + 8);
+        ctx.lineTo(lx, gridY + gridH - 8);
+        ctx.stroke();
+      }
+
+      for (let r = 0; r < 4; r++) {
+        const symIdx = (c * 3 + r + frameIndex * 2) % SLOT_ALL_SYMBOLS.length;
+        const sym = SLOT_ALL_SYMBOLS[symIdx];
+        const offset = ((frameIndex * 45 + c * 25) % 150) - 50;
+        const sy = gridY + 20 + r * 140 + offset;
+        ctx.globalAlpha = 0.65;
+        drawSlotSymbol(ctx, sym, colX + colWidth / 2, sy, 70, false);
+      }
+      ctx.restore();
+    } else {
+      for (let r = 0; r < 3; r++) {
+        const cellY = gridY + 12 + r * (rowHeight + rowGap);
+        const cellW = colWidth - 12;
+        const cellH = rowHeight - 6;
+        const cellX = colX + 6;
+
+        const sym = (table.grid && table.grid[r] && table.grid[r][c]) || 'PARCHMENT';
+        const isHit = highlightMap.has(`${c},${r}`);
+
+        roundedRect(ctx, cellX, cellY, cellW, cellH, 8);
+        if (isHit) {
+          ctx.fillStyle = 'rgba(234, 179, 8, 0.18)';
+          ctx.fill();
+          ctx.strokeStyle = '#facc15';
+          ctx.lineWidth = 2.5;
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = '#11191a';
+          ctx.fill();
+          ctx.strokeStyle = '#1e293b';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+
+        drawSlotSymbol(ctx, sym, cellX + cellW / 2, cellY + cellH / 2 - 10, 80, isHit);
+
+        ctx.fillStyle = isHit ? '#fef08a' : (SLOT_SYMBOL_COLORS[sym] || '#cbd5e1');
+        ctx.font = '700 13px "Microsoft YaHei", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(SLOT_SYMBOL_NAMES[sym] || sym, cellX + cellW / 2, cellY + cellH - 12);
+      }
+    }
+  }
+
+  // 3. Draw winning paylines in frame >= 9
+  if (frameIndex >= 9 && table.winLines && table.winLines.length) {
+    const lineColors = ['#facc15', '#22d3ee', '#f43f5e', '#a855f7', '#4ade80'];
+    table.winLines.forEach((wl, idx) => {
+      const color = lineColors[idx % lineColors.length];
+      const positions = wl.positions || [];
+      if (positions.length >= 2) {
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 4;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 12;
+        ctx.beginPath();
+        positions.forEach(([c, r], pIdx) => {
+          const colX = gridX + 8 + c * (colWidth + colGap);
+          const cellY = gridY + 12 + r * (rowHeight + rowGap);
+          const px = colX + colWidth / 2;
+          const py = cellY + (rowHeight - 6) / 2 - 10;
+          if (pIdx === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        });
+        ctx.stroke();
+
+        positions.forEach(([c, r]) => {
+          const colX = gridX + 8 + c * (colWidth + colGap);
+          const cellY = gridY + 12 + r * (rowHeight + rowGap);
+          const px = colX + colWidth / 2;
+          const py = cellY + (rowHeight - 6) / 2 - 10;
+          ctx.fillStyle = '#fff';
+          ctx.beginPath();
+          ctx.arc(px, py, 5, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.restore();
+      }
+    });
+  }
+
+  // 4. Bottom Settlement / Result Card
+  const botY = 650;
+  const botH = 194;
+  roundedRect(ctx, 70, botY, 1060, botH, 10);
+  ctx.fillStyle = 'rgba(10, 18, 17, 0.95)';
+  ctx.fill();
+  ctx.strokeStyle = table.totalPayout > 0 ? '#c99a3e' : '#334155';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  if (frameIndex < 8) {
+    ctx.fillStyle = '#5eead4';
+    ctx.font = '800 24px "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('【轮盘】 轮盘飞速旋转中... 正在召集旧日星图...', 600, botY + 105);
+  } else {
+    ctx.textAlign = 'left';
+    if (table.totalPayout > 0) {
+      ctx.fillStyle = '#fbbf24';
+      ctx.font = '800 22px "Microsoft YaHei", sans-serif';
+      const winCount = (table.winLines && table.winLines.length) || 0;
+      let titleMsg = isFree
+        ? `【狂欢中奖】 免费轮命中 ${winCount} 条线，赢得 ${table.totalPayout} 游戏币（派彩×2）！`
+        : `【中奖】 恭喜命中 ${winCount} 条派彩线，共赢得 ${table.totalPayout} 游戏币！`;
+      if (!isFree && table.freeSpins && table.freeSpins.triggered) {
+        titleMsg += ` 【免费旋转】 触发 ${table.freeSpins.count} 次免费旋转！`;
+      }
+      ctx.fillText(titleMsg, 95, botY + 36);
+    } else {
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '800 20px "Microsoft YaHei", sans-serif';
+      if (isFree) {
+        ctx.fillText('【狂欢轮休】 本轮未命中有效连线，免费轮不扣除游戏币。', 95, botY + 36);
+      } else {
+        ctx.fillText('【失利】 本轮未命中有效连线，深渊悄无声息地收走了押注...', 95, botY + 36);
+      }
+    }
+
+    let lineY = botY + 68;
+    if (table.winLines && table.winLines.length) {
+      table.winLines.slice(0, 3).forEach((wl) => {
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = '15px "Microsoft YaHei", sans-serif';
+        const symName = SLOT_SYMBOL_NAMES[wl.symbol] || wl.symbol;
+        ctx.fillText(`· 线路 #${wl.lineIndex} [${wl.lineName || '连线'}]: ${symName} ${wl.count}连 (x${wl.multiplier}) → 赢得 ${wl.payout} 币`, 100, lineY);
+        lineY += 24;
+      });
+      if (table.winLines.length > 3) {
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '13px "Microsoft YaHei", sans-serif';
+        ctx.fillText(`... 及另外 ${table.winLines.length - 3} 条连线`, 100, lineY);
+        lineY += 20;
+      }
+    } else {
+      ctx.fillStyle = '#64748b';
+      ctx.font = '15px "Microsoft YaHei", sans-serif';
+      ctx.fillText('· 规则提示：从最左侧卷轴起向右连续命中3个及以上相同符号（或WILD）即可获赔。', 100, lineY);
+      lineY += 24;
+    }
+
+    if (isFree) {
+      ctx.fillStyle = '#fb7185';
+      ctx.font = '700 15px "Microsoft YaHei", sans-serif';
+      if (table.freeSpins && table.freeSpins.remaining > 0) {
+        ctx.fillText(`【狂欢进行中】 剩余 ${table.freeSpins.remaining} 次免费旋转，当前狂欢累计赢得 ${table.freeSpins.totalWon || table.totalPayout} 游戏币！`, 100, lineY);
+      } else {
+        ctx.fillText(`【狂欢落幕】 本次免费旋转已全部结束，累计狂欢斩获 ${table.freeSpins.totalWon || table.totalPayout} 游戏币！`, 100, lineY);
+      }
+    } else if (table.freeSpins && table.freeSpins.triggered) {
+      ctx.fillStyle = '#f43f5e';
+      ctx.font = '700 15px "Microsoft YaHei", sans-serif';
+      ctx.fillText(`【SCATTER 狂欢】 ${table.scatters.length} 个面具全盘分散，获得 ${table.freeSpins.instantPay} 币即时奖与 ${table.freeSpins.count} 次 2倍免费旋转！`, 100, lineY);
+    } else {
+      ctx.fillStyle = '#6ee7b7';
+      ctx.font = 'italic 14px "Microsoft YaHei", sans-serif';
+      ctx.fillText(`“${table.quote || '不可名状的齿轮咬合转动，群星归位于拉莱耶的深海...'}”`, 100, lineY);
+    }
+
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.font = '13px "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText('骰娘好感度 · 旧日连线：拉莱耶之轮', 1100, botY + botH - 16);
+  }
+}
+
+function renderSlotGif(table) {
+  const width = 1200;
+  const height = 900;
+  const encoder = new GifEncoder(width, height);
+  encoder.setRepeat(0);
+
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  // 12 frames: 前11帧过渡动画 (80~200ms)，最后一帧 30000cs (300秒) 锁定定格画面
+  const delays = [8, 8, 9, 10, 10, 10, 12, 15, 18, 18, 20, 30000];
+
+  for (let i = 1; i <= 12; i++) {
+    drawSlotFrame(ctx, table, i, i === 12);
+    encoder.addFrame(ctx, delays[i - 1]);
+  }
+
+  return encoder.finish();
 }
 
 function drawLotteryBall(ctx, x, y, value, color, highlighted, radius = 24) {
@@ -3929,6 +4478,14 @@ async function renderView(rawView) {
     drawScratchTicket(ctx, view, accent);
     return canvas.toBuffer('image/png');
   }
+  if (view.slotScene) {
+    if (view.slotScene.static) {
+      drawSlotFrame(ctx, view.slotScene, 12, true);
+      return canvas.toBuffer('image/png');
+    }
+    const gifBuffer = renderSlotGif(view.slotScene);
+    return { buffer: gifBuffer, mime: 'image/gif' };
+  }
   if (view.dmdTable) {
     drawDmdTable(ctx, view);
     return canvas.toBuffer('image/png');
@@ -4076,8 +4633,12 @@ function sendJson(res, status, body) {
 }
 
 function sendPng(res, buffer) {
+  sendImage(res, buffer, 'image/png');
+}
+
+function sendImage(res, buffer, mime = 'image/png') {
   res.writeHead(200, {
-    'Content-Type': 'image/png',
+    'Content-Type': mime,
     'Content-Length': buffer.length,
     'Cache-Control': 'private, max-age=300',
     'Access-Control-Allow-Origin': '*'
@@ -4121,15 +4682,18 @@ const server = http.createServer(async (req, res) => {
     pruneRenderedImages();
     const entry = renderedImages.get(imageMatch[1]);
     if (!entry) sendJson(res, 404, { ok: false, error: 'image expired or not found' });
-    else sendPng(res, entry.buffer);
+    else sendImage(res, entry.buffer, entry.mime || 'image/png');
     return;
   }
   if (req.method === 'POST' && req.url === '/api/render') {
     try {
       const view = await readJson(req);
-      const png = await renderView(view);
-      const id = storeRenderedImage(png);
-      sendJson(res, 200, { ok: true, mime: 'image/png', url: `/api/image/${id}`, expiresIn: Math.floor(RENDER_TTL_MS / 1000) });
+      const rendered = await renderView(view);
+      const isBuffer = Buffer.isBuffer(rendered);
+      const buffer = isBuffer ? rendered : rendered.buffer;
+      const mime = isBuffer ? 'image/png' : (rendered.mime || 'image/png');
+      const id = storeRenderedImage(buffer, mime);
+      sendJson(res, 200, { ok: true, mime, url: `/api/image/${id}`, expiresIn: Math.floor(RENDER_TTL_MS / 1000) });
     } catch (error) {
       sendJson(res, error.message === 'request too large' ? 413 : 400, { ok: false, error: error.message });
     }
@@ -4144,4 +4708,15 @@ if (require.main === module) {
   });
 }
 
-module.exports = { renderView, normalizeView, normalizeFishingCardTable, drawFishingCardTable, drawFourKnifeTable, server };
+module.exports = {
+  renderView,
+  normalizeView,
+  normalizeFishingCardTable,
+  drawFishingCardTable,
+  drawFourKnifeTable,
+  normalizeSlotScene,
+  drawSlotSymbol,
+  drawSlotFrame,
+  renderSlotGif,
+  server
+};
