@@ -1,0 +1,1513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>海豹骰 多风格 (骰子/多表盘/多滚轮) 动效生成器</title>
+    <!-- 轻量 GIF 编码器 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gifshot/0.3.2/gifshot.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #070a12;
+            --panel-bg: #0f172a;
+            --border-color: #1e293b;
+            --accent-gold: #f59e0b;
+            --accent-green: #10b981;
+            --accent-blue: #38bdf8;
+            --accent-purple: #a855f7;
+            --accent-red: #ef4444;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", monospace;
+            background-color: var(--bg-color);
+            color: #f1f5f9;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 16px;
+            min-height: 100vh;
+        }
+        h1 {
+            font-size: 1.35rem;
+            margin-bottom: 14px;
+            color: #f8fafc;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            text-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
+        }
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            max-width: 1060px;
+            width: 100%;
+            justify-content: center;
+        }
+        .panel {
+            background: var(--panel-bg);
+            border-radius: 14px;
+            padding: 18px;
+            box-shadow: 0 12px 35px rgba(0,0,0,0.7);
+            border: 1px solid var(--border-color);
+        }
+        .control-panel {
+            flex: 1;
+            min-width: 320px;
+            max-width: 430px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .preview-panel {
+            flex: 1.2;
+            min-width: 380px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 14px;
+        }
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        label {
+            font-size: 0.8rem;
+            color: #94a3b8;
+            font-weight: 600;
+        }
+        input, select {
+            background: #070a12;
+            border: 1px solid var(--border-color);
+            color: #fff;
+            padding: 9px 12px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        input:focus, select:focus {
+            border-color: var(--accent-blue);
+        }
+        .row {
+            display: flex;
+            gap: 8px;
+        }
+        .row > div { flex: 1; }
+        .btn-group {
+            display: flex;
+            gap: 8px;
+            margin-top: 4px;
+        }
+        button {
+            flex: 1;
+            padding: 11px 14px;
+            border: none;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+        .btn-random { flex: 0.35; background: #1e293b; color: #fff; }
+        .btn-random:hover { background: #334155; }
+        .btn-primary { background: #2563eb; color: white; }
+        .btn-primary:hover { background: #1d4ed8; }
+        .btn-export { background: var(--accent-gold); color: #070a12; }
+        .btn-export:hover { background: #d97706; }
+        .btn-save { background: var(--accent-green); color: white; width: 100%; text-decoration: none; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* 风格切换单选块 */
+        .style-selector {
+            display: flex;
+            gap: 6px;
+            background: #070a12;
+            padding: 4px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+        .style-btn {
+            flex: 1;
+            padding: 8px 4px;
+            font-size: 0.8rem;
+            background: transparent;
+            color: #94a3b8;
+            border-radius: 6px;
+        }
+        .style-btn.active {
+            background: #1e293b;
+            color: var(--accent-blue);
+            border: 1px solid #334155;
+        }
+
+        /* 画布视口 */
+        #canvas-wrapper {
+            position: relative;
+            width: 400px;
+            height: 400px;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 2px solid var(--border-color);
+            background: #03060c;
+            box-shadow: inset 0 0 50px rgba(0,0,0,0.9), 0 0 25px rgba(0,0,0,0.5);
+        }
+        #diceCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        #gif-result-wrapper {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+        }
+        #gif-preview {
+            width: 360px;
+            height: 360px;
+            border-radius: 8px;
+            border: 2px solid var(--accent-green);
+            box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
+        }
+        .progress-bar {
+            width: 100%;
+            height: 5px;
+            background: #1e293b;
+            border-radius: 3px;
+            overflow: hidden;
+            display: none;
+        }
+        .progress-inner {
+            width: 0%;
+            height: 100%;
+            background: var(--accent-gold);
+            transition: width 0.1s;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>🎲 海豹骰 多风格动效生成器 (精准定格版)</h1>
+
+    <div class="container">
+        <!-- 控制表单 -->
+        <div class="panel control-panel">
+            <div class="form-group">
+                <label>视觉表现分支风格 (Visual Theme)</label>
+                <div class="style-selector">
+                    <button class="style-btn active" id="btnStyleDice" onclick="setStyle('dice')">🎲 晶体骰子</button>
+                    <button class="style-btn" id="btnStyleRoulette" onclick="setStyle('roulette')">🎡 命运表盘</button>
+                    <button class="style-btn" id="btnStyleSlot" onclick="setStyle('slot')">🎰 多轴老虎机</button>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>检定类型 / 模式</label>
+                <select id="mainMode" onchange="onMainModeChange()">
+                    <option value="coc">CoC 7th 检定 (支持 奖励骰/惩罚骰/大失败碎屏)</option>
+                    <option value="dnd">D&D 5e 检定 (支持 优势/劣势)</option>
+                    <option value="multi">复合多骰组合 (如: d4 + 2d6 + d8 + 3)</option>
+                    <option value="single">单骰基础投掷 (d2 ~ d20 各类单骰)</option>
+                </select>
+            </div>
+
+            <div id="dynamicSettings"></div>
+
+            <div class="form-group">
+                <label>当前检定判定与状态</label>
+                <div id="statusBadge" style="padding: 10px 14px; background: #070a12; border-radius: 6px; font-weight: bold; border-left: 4px solid var(--accent-green); color: var(--accent-green); font-size: 0.9rem;">
+                    普通成功 (Regular Success)
+                </div>
+            </div>
+
+            <div class="btn-group">
+                <button class="btn-primary" onclick="playAnimation()">▶ 播放动效</button>
+                <button class="btn-export" id="btnGif" onclick="generateGIF()">📷 导出超清 GIF</button>
+            </div>
+
+            <div class="progress-bar" id="progressBar">
+                <div class="progress-inner" id="progressInner"></div>
+            </div>
+            <div id="statusTip" style="font-size: 0.8rem; color: #64748b; text-align: center;">准备就绪</div>
+        </div>
+
+        <!-- 画布面板 -->
+        <div class="panel preview-panel">
+            <div id="canvas-wrapper">
+                <canvas id="diceCanvas" width="800" height="800"></canvas>
+            </div>
+
+            <div id="gif-result-wrapper">
+                <img id="gif-preview" alt="GIF Output" />
+                <a id="downloadLink" download="dice_roll.gif" style="width: 100%; text-decoration: none;">
+                    <button class="btn-save">💾 保存 GIF 文件至本地</button>
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        /* ================= 1. 核心状态与响应式模型 ================= */
+        const canvas = document.getElementById('diceCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let visualStyle = 'dice'; // 'dice', 'roulette', 'slot'
+
+        let rollConfig = {
+            mode: 'coc',
+            title: '侦查',
+            target: 60,
+            diceList: [], // { type, value, display, sectors, chosenIdx, isTens, isChosen, isDiscarded, label }
+            modifier: 0,
+            finalTotal: 32,
+            rankType: 'success',
+            rankText: '普通成功',
+            targetColor: '#10b981'
+        };
+
+        function setStyle(st) {
+            visualStyle = st;
+            document.getElementById('btnStyleDice').className = 'style-btn' + (st === 'dice' ? ' active' : '');
+            document.getElementById('btnStyleRoulette').className = 'style-btn' + (st === 'roulette' ? ' active' : '');
+            document.getElementById('btnStyleSlot').className = 'style-btn' + (st === 'slot' ? ' active' : '');
+            playAnimation();
+        }
+
+        function onMainModeChange() {
+            const mode = document.getElementById('mainMode').value;
+            const container = document.getElementById('dynamicSettings');
+            container.innerHTML = '';
+
+            if (mode === 'coc') {
+                container.innerHTML = `
+                    <div class="row">
+                        <div class="form-group">
+                            <label>技能名称</label>
+                            <input type="text" id="cocName" value="侦查" oninput="updateConfig()">
+                        </div>
+                        <div class="form-group">
+                            <label>技能目标值</label>
+                            <input type="number" id="cocTarget" value="60" min="1" max="100" oninput="updateConfig()">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>奖励 / 惩罚骰设置</label>
+                        <select id="cocBp" onchange="renderCocDiceInputs(); updateConfig();">
+                            <option value="0">标准检定 (双 D10)</option>
+                            <option value="b1">奖励骰 1 (Bonus 1)</option>
+                            <option value="b2">奖励骰 2 (Bonus 2)</option>
+                            <option value="p1">惩罚骰 1 (Penalty 1)</option>
+                            <option value="p2">惩罚骰 2 (Penalty 2)</option>
+                        </select>
+                    </div>
+                    <div id="cocDiceInputs"></div>
+                `;
+                renderCocDiceInputs();
+            } else if (mode === 'dnd') {
+                container.innerHTML = `
+                    <div class="row">
+                        <div class="form-group">
+                            <label>检定 / 豁免名称</label>
+                            <input type="text" id="dndName" value="敏捷豁免" oninput="updateConfig()">
+                        </div>
+                        <div class="form-group">
+                            <label>目标 DC</label>
+                            <input type="number" id="dndTarget" value="15" min="1" max="30" oninput="updateConfig()">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>优劣势模式</label>
+                        <select id="dndAdv" onchange="renderDndDiceInputs(); updateConfig();">
+                            <option value="none">普通检定 (单 D20)</option>
+                            <option value="adv">优势 (Advantage - 取高)</option>
+                            <option value="dis">劣势 (Disadvantage - 取低)</option>
+                        </select>
+                    </div>
+                    <div id="dndDiceInputs"></div>
+                `;
+                renderDndDiceInputs();
+            } else if (mode === 'multi') {
+                container.innerHTML = `
+                    <div class="form-group">
+                        <label>复合骰子表达式</label>
+                        <input type="text" id="multiExpr" value="1d4 + 2d6 + 1d8 + 3" onchange="parseMultiExpression(); updateConfig();">
+                    </div>
+                    <div id="multiDiceInputs"></div>
+                `;
+                parseMultiExpression();
+            } else if (mode === 'single') {
+                container.innerHTML = `
+                    <div class="row">
+                        <div class="form-group">
+                            <label>骰子种类</label>
+                            <select id="singleType" onchange="updateSingleInputs(); updateConfig();">
+                                <option value="d3">d3 (三面骰)</option>
+                                <option value="d4">d4 (四面金字塔)</option>
+                                <option value="d6">d6 (六面骰)</option>
+                                <option value="d8">d8 (八面骰)</option>
+                                <option value="d10">d10 (十面骰)</option>
+                                <option value="d12">d12 (十二面骰)</option>
+                                <option value="d20">d20 (二十面骰)</option>
+                                <option value="d2">d2 (硬币正反)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>投掷点数</label>
+                            <div style="display: flex; gap: 6px;">
+                                <input type="number" id="singleVal" value="2" min="1" max="3" style="width: 100%;" oninput="updateConfig()">
+                                <button class="btn-random" onclick="randomSingle()">🎲</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                updateSingleInputs();
+            }
+
+            updateConfig();
+            playAnimation();
+        }
+
+        function renderCocDiceInputs() {
+            const bp = document.getElementById('cocBp').value;
+            const container = document.getElementById('cocDiceInputs');
+            let count = 1;
+            if (bp === 'b1' || bp === 'p1') count = 2;
+            if (bp === 'b2' || bp === 'p2') count = 3;
+
+            let html = '<div class="row">';
+            for (let i = 0; i < count; i++) {
+                html += `
+                    <div class="form-group">
+                        <label>${i === 0 ? '十位骰' : '奖惩十位 ' + i}</label>
+                        <input type="number" class="coc-tens-in" value="${i === 0 ? 30 : 70}" step="10" min="0" max="90" oninput="updateConfig()">
+                    </div>
+                `;
+            }
+            html += `
+                <div class="form-group">
+                    <label>个位骰</label>
+                    <input type="number" id="cocUnits" value="2" min="0" max="9" oninput="updateConfig()">
+                </div>
+                <button class="btn-random" style="align-self: flex-end; height: 38px;" onclick="randomCoc()">🎲</button>
+            </div>`;
+            container.innerHTML = html;
+        }
+
+        function randomCoc() {
+            const tensInputs = document.querySelectorAll('.coc-tens-in');
+            tensInputs.forEach(input => {
+                input.value = Math.floor(Math.random() * 10) * 10;
+            });
+            document.getElementById('cocUnits').value = Math.floor(Math.random() * 10);
+            updateConfig();
+            playAnimation();
+        }
+
+        function renderDndDiceInputs() {
+            const adv = document.getElementById('dndAdv').value;
+            const container = document.getElementById('dndDiceInputs');
+            if (adv === 'none') {
+                container.innerHTML = `
+                    <div class="form-group">
+                        <label>D20 掷骰点数 (1-20)</label>
+                        <div style="display: flex; gap: 6px;">
+                            <input type="number" id="dndVal1" value="18" min="1" max="20" style="width: 100%;" oninput="updateConfig()">
+                            <button class="btn-random" onclick="randomDnd()">🎲</button>
+                        </div>
+                    </div>
+                `;
+            } else {
+                container.innerHTML = `
+                    <div class="row">
+                        <div class="form-group">
+                            <label>D20 (骰 1)</label>
+                            <input type="number" id="dndVal1" value="18" min="1" max="20" oninput="updateConfig()">
+                        </div>
+                        <div class="form-group">
+                            <label>D20 (骰 2)</label>
+                            <input type="number" id="dndVal2" value="4" min="1" max="20" oninput="updateConfig()">
+                        </div>
+                        <button class="btn-random" style="align-self: flex-end; height: 38px;" onclick="randomDnd()">🎲</button>
+                    </div>
+                `;
+            }
+        }
+
+        function randomDnd() {
+            const v1 = document.getElementById('dndVal1');
+            if (v1) v1.value = Math.floor(Math.random() * 20) + 1;
+            const v2 = document.getElementById('dndVal2');
+            if (v2) v2.value = Math.floor(Math.random() * 20) + 1;
+            updateConfig();
+            playAnimation();
+        }
+
+        let parsedMultiList = [];
+        let multiModifier = 0;
+        function parseMultiExpression() {
+            const expr = document.getElementById('multiExpr').value;
+            const container = document.getElementById('multiDiceInputs');
+            const parts = expr.replace(/\s+/g, '').split('+');
+            parsedMultiList = [];
+            multiModifier = 0;
+
+            parts.forEach(p => {
+                if (p.includes('d')) {
+                    const [countStr, typeStr] = p.split('d');
+                    const count = parseInt(countStr) || 1;
+                    const type = 'd' + typeStr;
+                    for (let i = 0; i < count; i++) {
+                        const max = parseInt(typeStr) || 6;
+                        parsedMultiList.push({ type, max, value: Math.ceil(max / 2) });
+                    }
+                } else if (!isNaN(parseInt(p))) {
+                    multiModifier += parseInt(p);
+                }
+            });
+
+            let html = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px;">';
+            parsedMultiList.slice(0, 6).forEach((d, idx) => {
+                html += `
+                    <div class="form-group">
+                        <label>${d.type.toUpperCase()} #${idx+1}</label>
+                        <input type="number" class="multi-val-in" data-idx="${idx}" value="${d.value}" min="1" max="${d.max}" oninput="updateConfig()">
+                    </div>
+                `;
+            });
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        function updateSingleInputs() {
+            const type = document.getElementById('singleType').value;
+            const input = document.getElementById('singleVal');
+            const max = parseInt(type.replace('d', ''));
+            input.max = max;
+            input.value = Math.max(1, Math.min(max, parseInt(input.value) || 1));
+        }
+
+        function randomSingle() {
+            const type = document.getElementById('singleType').value;
+            const max = parseInt(type.replace('d', ''));
+            document.getElementById('singleVal').value = Math.floor(Math.random() * max) + 1;
+            updateConfig();
+            playAnimation();
+        }
+
+        /* ================= 2. 规则结算与统一装配 ================= */
+        function updateConfig() {
+            const mode = document.getElementById('mainMode').value;
+            rollConfig.mode = mode;
+            rollConfig.diceList = [];
+            rollConfig.modifier = 0;
+
+            if (mode === 'coc') {
+                rollConfig.title = document.getElementById('cocName').value || '检定';
+                rollConfig.target = parseInt(document.getElementById('cocTarget').value) || 50;
+                const bp = document.getElementById('cocBp').value;
+
+                const tensInputs = document.querySelectorAll('.coc-tens-in');
+                const units = parseInt(document.getElementById('cocUnits').value) || 0;
+
+                const tensList = [];
+                tensInputs.forEach(inp => tensList.push(parseInt(inp.value) || 0));
+
+                const candidates = tensList.map((t, idx) => {
+                    let total = t + units;
+                    if (t === 0 && units === 0) total = 100;
+                    return { t, units, total, idx };
+                });
+
+                let chosenIdx = 0;
+                if (bp.startsWith('b')) {
+                    candidates.sort((a, b) => a.total - b.total);
+                    chosenIdx = candidates[0].idx;
+                } else if (bp.startsWith('p')) {
+                    candidates.sort((a, b) => b.total - a.total);
+                    chosenIdx = candidates[0].idx;
+                }
+
+                const bestCandidate = candidates.find(c => c.idx === chosenIdx) || candidates[0];
+                rollConfig.finalTotal = bestCandidate.total;
+
+                tensList.forEach((t, idx) => {
+                    const sectorIdx = Math.floor((t % 100) / 10);
+                    rollConfig.diceList.push({
+                        type: 'd10',
+                        label: tensList.length > 1 ? `十位#${idx+1}` : '十位',
+                        value: t,
+                        display: t === 0 && units === 0 ? '00' : (t < 10 ? '00' : String(t)),
+                        sectors: 10,
+                        sectorItems: ['00','10','20','30','40','50','60','70','80','90'],
+                        chosenIdx: sectorIdx,
+                        isTens: true,
+                        isChosen: idx === chosenIdx,
+                        isDiscarded: idx !== chosenIdx && tensList.length > 1
+                    });
+                });
+
+                rollConfig.diceList.push({
+                    type: 'd10',
+                    label: '个位',
+                    value: units,
+                    display: String(units),
+                    sectors: 10,
+                    sectorItems: ['0','1','2','3','4','5','6','7','8','9'],
+                    chosenIdx: units % 10,
+                    isTens: false,
+                    isChosen: true,
+                    isDiscarded: false
+                });
+
+                const s = rollConfig.target;
+                const r = rollConfig.finalTotal;
+                if (r === 1) {
+                    rollConfig.rankType = 'crit'; rollConfig.rankText = '大成功 (Critical)'; rollConfig.targetColor = '#f59e0b';
+                } else if ((s < 50 && r >= 96) || r === 100) {
+                    rollConfig.rankType = 'fumble'; rollConfig.rankText = '大失败 (Fumble)'; rollConfig.targetColor = '#ef4444';
+                } else if (r <= Math.floor(s / 5)) {
+                    rollConfig.rankType = 'extreme'; rollConfig.rankText = '极难成功 (Extreme)'; rollConfig.targetColor = '#a855f7';
+                } else if (r <= Math.floor(s / 2)) {
+                    rollConfig.rankType = 'hard'; rollConfig.rankText = '困难成功 (Hard)'; rollConfig.targetColor = '#38bdf8';
+                } else if (r <= s) {
+                    rollConfig.rankType = 'success'; rollConfig.rankText = '普通成功 (Success)'; rollConfig.targetColor = '#10b981';
+                } else {
+                    rollConfig.rankType = 'fail'; rollConfig.rankText = '失败 (Failure)'; rollConfig.targetColor = '#f43f5e';
+                }
+            } else if (mode === 'dnd') {
+                rollConfig.title = document.getElementById('dndName').value || '检定';
+                rollConfig.target = parseInt(document.getElementById('dndTarget').value) || 15;
+                const adv = document.getElementById('dndAdv').value;
+
+                const v1 = parseInt(document.getElementById('dndVal1').value) || 10;
+                const d20Items = Array.from({length: 20}, (_, i) => String(i+1));
+
+                if (adv === 'none') {
+                    rollConfig.finalTotal = v1;
+                    rollConfig.diceList.push({
+                        type: 'd20',
+                        label: 'D20',
+                        value: v1,
+                        display: String(v1),
+                        sectors: 20,
+                        sectorItems: d20Items,
+                        chosenIdx: v1 - 1,
+                        isChosen: true,
+                        isDiscarded: false
+                    });
+                } else {
+                    const v2 = parseInt(document.getElementById('dndVal2').value) || 10;
+                    const isAdv = (adv === 'adv');
+                    const chosenV1 = isAdv ? (v1 >= v2) : (v1 <= v2);
+                    rollConfig.finalTotal = chosenV1 ? v1 : v2;
+
+                    rollConfig.diceList.push({
+                        type: 'd20',
+                        label: 'D20 #1',
+                        value: v1,
+                        display: String(v1),
+                        sectors: 20,
+                        sectorItems: d20Items,
+                        chosenIdx: v1 - 1,
+                        isChosen: chosenV1,
+                        isDiscarded: !chosenV1
+                    });
+                    rollConfig.diceList.push({
+                        type: 'd20',
+                        label: 'D20 #2',
+                        value: v2,
+                        display: String(v2),
+                        sectors: 20,
+                        sectorItems: d20Items,
+                        chosenIdx: v2 - 1,
+                        isChosen: !chosenV1,
+                        isDiscarded: chosenV1
+                    });
+                }
+
+                if (rollConfig.finalTotal === 20) {
+                    rollConfig.rankType = 'crit'; rollConfig.rankText = '天然 20 (大成功)'; rollConfig.targetColor = '#f59e0b';
+                } else if (rollConfig.finalTotal === 1) {
+                    rollConfig.rankType = 'fumble'; rollConfig.rankText = '天然 1 (大失败)'; rollConfig.targetColor = '#ef4444';
+                } else if (rollConfig.finalTotal >= rollConfig.target) {
+                    rollConfig.rankType = 'success'; rollConfig.rankText = '检定通过 (Success)'; rollConfig.targetColor = '#10b981';
+                } else {
+                    rollConfig.rankType = 'fail'; rollConfig.rankText = '检定失败 (Failure)'; rollConfig.targetColor = '#f43f5e';
+                }
+            } else if (mode === 'multi') {
+                rollConfig.title = document.getElementById('multiExpr').value;
+                rollConfig.modifier = multiModifier;
+                let total = multiModifier;
+
+                parsedMultiList.forEach((d, idx) => {
+                    const inp = document.querySelector(`.multi-val-in[data-idx="${idx}"]`);
+                    if (inp) d.value = parseInt(inp.value) || 1;
+                    total += d.value;
+                });
+                rollConfig.finalTotal = total;
+
+                parsedMultiList.slice(0, 6).forEach((d, idx) => {
+                    const secCount = d.max;
+                    const items = Array.from({length: secCount}, (_, i) => String(i+1));
+                    rollConfig.diceList.push({
+                        type: d.type,
+                        label: `${d.type.toUpperCase()}#${idx+1}`,
+                        value: d.value,
+                        display: String(d.value),
+                        sectors: secCount,
+                        sectorItems: items,
+                        chosenIdx: d.value - 1,
+                        isChosen: true,
+                        isDiscarded: false
+                    });
+                });
+                rollConfig.rankType = 'success';
+                rollConfig.rankText = `总点数: ${total}`;
+                rollConfig.targetColor = '#38bdf8';
+            } else if (mode === 'single') {
+                const type = document.getElementById('singleType').value;
+                const val = parseInt(document.getElementById('singleVal').value) || 1;
+                rollConfig.title = `${type.toUpperCase()} 投掷`;
+                rollConfig.finalTotal = val;
+                const max = parseInt(type.replace('d', ''));
+                let disp = String(val);
+                let items = Array.from({length: max}, (_, i) => String(i+1));
+                if (type === 'd2') {
+                    disp = (val === 1 ? '正' : '反');
+                    items = ['正', '反'];
+                }
+
+                rollConfig.diceList.push({
+                    type,
+                    label: type.toUpperCase(),
+                    value: val,
+                    display: disp,
+                    sectors: max,
+                    sectorItems: items,
+                    chosenIdx: val - 1,
+                    isChosen: true,
+                    isDiscarded: false
+                });
+                rollConfig.rankType = 'success';
+                rollConfig.rankText = `结果: ${disp}`;
+                rollConfig.targetColor = '#10b981';
+            }
+
+            const badge = document.getElementById('statusBadge');
+            badge.innerText = rollConfig.rankText;
+            badge.style.color = rollConfig.targetColor;
+            badge.style.borderLeftColor = rollConfig.targetColor;
+        }
+
+        /* ================= 3. 颜色工具与分面绘制 ================= */
+        function lerpColor(c1, c2, factor) {
+            function parseHex(h) {
+                h = h.replace('#', '');
+                if (h.length === 3) h = h.split('').map(x => x+x).join('');
+                return [parseInt(h.slice(0,2), 16), parseInt(h.slice(2,4), 16), parseInt(h.slice(4,6), 16)];
+            }
+            const [r1, g1, b1] = parseHex(c1);
+            const [r2, g2, b2] = parseHex(c2);
+            const r = Math.round(r1 + (r2 - r1) * factor);
+            const g = Math.round(g1 + (g2 - g1) * factor);
+            const b = Math.round(b1 + (b2 - b1) * factor);
+            return `rgb(${r}, ${g}, ${b})`;
+        }
+
+        function drawFacet(ctx, pts, fillStyle, strokeStyle, lineWidth = 2.5) {
+            ctx.beginPath();
+            ctx.moveTo(pts[0][0], pts[0][1]);
+            for(let i=1; i<pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+            ctx.closePath();
+            if (fillStyle) { ctx.fillStyle = fillStyle; ctx.fill(); }
+            if (strokeStyle) {
+                ctx.strokeStyle = strokeStyle;
+                ctx.lineWidth = lineWidth;
+                ctx.lineJoin = 'round';
+                ctx.stroke();
+            }
+        }
+
+        function drawDiceText(ctx, text, x, y, size = 32, color = '#ffffff') {
+            ctx.save();
+            ctx.fillStyle = color;
+            ctx.font = `900 ${size}px "JetBrains Mono", "Segoe UI", sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.shadowColor = 'rgba(0,0,0,0.95)';
+            ctx.shadowBlur = 10;
+            ctx.fillText(text, x, y + 2);
+            ctx.restore();
+        }
+
+        /* ================= 4. 风格 A: 经典 2D 晶石线框骰 ================= */
+        const DiceRenderers = {
+            d3(ctx, R, lineCol, val) {
+                const h = R * 1.05;
+                const p0 = [0, -h], p1 = [R * Math.cos(Math.PI/6), h * 0.5], p2 = [-R * Math.cos(Math.PI/6), h * 0.5];
+                ctx.beginPath(); ctx.moveTo(p0[0], p0[1]);
+                ctx.quadraticCurveTo(R * 0.8, -h * 0.3, p1[0], p1[1]);
+                ctx.quadraticCurveTo(0, h * 1.15, p2[0], p2[1]);
+                ctx.quadraticCurveTo(-R * 0.8, -h * 0.3, p0[0], p0[1]);
+                ctx.fillStyle = '#0f172a'; ctx.fill();
+                ctx.strokeStyle = lineCol; ctx.lineWidth = 3.5; ctx.stroke();
+                drawFacet(ctx, [[0,0], p0, p1], 'rgba(30, 41, 59, 0.4)', null);
+                drawFacet(ctx, [[0,0], p1, p2], 'rgba(15, 23, 42, 0.6)', null);
+                drawFacet(ctx, [[0,0], p2, p0], 'rgba(51, 65, 85, 0.3)', null);
+                ctx.beginPath();
+                ctx.moveTo(0, 0); ctx.lineTo(p0[0], p0[1]);
+                ctx.moveTo(0, 0); ctx.lineTo(p1[0], p1[1]);
+                ctx.moveTo(0, 0); ctx.lineTo(p2[0], p2[1]);
+                ctx.strokeStyle = lineCol; ctx.lineWidth = 2.2; ctx.stroke();
+                drawDiceText(ctx, val, 0, h * 0.15, R * 0.48);
+            },
+            d2(ctx, R, lineCol, val) {
+                ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2);
+                ctx.fillStyle = '#0f172a'; ctx.fill();
+                ctx.strokeStyle = lineCol; ctx.lineWidth = 4; ctx.stroke();
+                ctx.beginPath(); ctx.arc(0, 0, R * 0.82, 0, Math.PI * 2);
+                ctx.strokeStyle = lineCol; ctx.lineWidth = 1.8; ctx.setLineDash([6, 6]); ctx.stroke(); ctx.setLineDash([]);
+                drawDiceText(ctx, val, 0, 0, R * 0.52);
+            },
+            d4(ctx, R, lineCol, val) {
+                const h = R * 1.1, pTop = [0, -h], pLeft = [-R * 0.95, h * 0.6], pRight = [R * 0.95, h * 0.6], pCenter = [0, h * 0.1];
+                drawFacet(ctx, [pTop, pRight, pLeft], '#0b1120', lineCol, 3.5);
+                drawFacet(ctx, [pTop, pRight, pCenter], 'rgba(30, 41, 59, 0.5)', null);
+                drawFacet(ctx, [pTop, pLeft, pCenter], 'rgba(51, 65, 85, 0.4)', null);
+                drawFacet(ctx, [pLeft, pRight, pCenter], 'rgba(15, 23, 42, 0.8)', null);
+                ctx.beginPath();
+                ctx.moveTo(pTop[0], pTop[1]); ctx.lineTo(pCenter[0], pCenter[1]);
+                ctx.moveTo(pLeft[0], pLeft[1]); ctx.lineTo(pCenter[0], pCenter[1]);
+                ctx.moveTo(pRight[0], pRight[1]); ctx.lineTo(pCenter[0], pCenter[1]);
+                ctx.strokeStyle = lineCol; ctx.lineWidth = 2.2; ctx.stroke();
+                drawDiceText(ctx, val, 0, h * 0.28, R * 0.46);
+            },
+            d6(ctx, R, lineCol, val) {
+                const pts = [];
+                for(let i=0; i<6; i++) {
+                    const ang = (i * 60 - 30) * Math.PI / 180;
+                    pts.push([R * Math.cos(ang), R * Math.sin(ang)]);
+                }
+                drawFacet(ctx, pts, '#0f172a', lineCol, 3.5);
+                drawFacet(ctx, [[0,0], pts[0], pts[1], pts[2]], 'rgba(51, 65, 85, 0.45)', lineCol, 2.0);
+                drawFacet(ctx, [[0,0], pts[2], pts[3], pts[4]], 'rgba(15, 23, 42, 0.7)', lineCol, 2.0);
+                drawFacet(ctx, [[0,0], pts[4], pts[5], pts[0]], 'rgba(30, 41, 59, 0.55)', lineCol, 2.0);
+                drawDiceText(ctx, val, 0, 0, R * 0.54);
+            },
+            d8(ctx, R, lineCol, val) {
+                const pTop = [0, -R * 1.15], pBottom = [0, R * 1.15], pLeft = [-R * 0.9, 0], pRight = [R * 0.9, 0];
+                drawFacet(ctx, [pTop, pRight, pBottom, pLeft], '#0f172a', lineCol, 3.5);
+                drawFacet(ctx, [pTop, pRight, [0,0]], 'rgba(51, 65, 85, 0.45)', null);
+                drawFacet(ctx, [pTop, pLeft, [0,0]], 'rgba(30, 41, 59, 0.35)', null);
+                drawFacet(ctx, [pBottom, pLeft, [0,0]], 'rgba(15, 23, 42, 0.7)', null);
+                drawFacet(ctx, [pBottom, pRight, [0,0]], 'rgba(15, 23, 42, 0.85)', null);
+                ctx.beginPath();
+                ctx.moveTo(pLeft[0], pLeft[1]); ctx.lineTo(pRight[0], pRight[1]);
+                ctx.moveTo(pTop[0], pTop[1]); ctx.lineTo(0, 0);
+                ctx.moveTo(pBottom[0], pBottom[1]); ctx.lineTo(0, 0);
+                ctx.strokeStyle = lineCol; ctx.lineWidth = 2.2; ctx.stroke();
+                drawDiceText(ctx, val, 0, -R * 0.15, R * 0.5);
+            },
+            d10(ctx, R, lineCol, val) {
+                const pTop = [0, -R * 1.22], pBottom = [0, R * 1.12], pUpperL = [-R * 0.88, -R * 0.2], pUpperR = [R * 0.88, -R * 0.2], pLowerL = [-R * 0.55, R * 0.62], pLowerR = [R * 0.55, R * 0.62], pCenter = [0, 0];
+                drawFacet(ctx, [pTop, pUpperR, pLowerR, pBottom, pLowerL, pUpperL], '#0f172a', lineCol, 3.5);
+                drawFacet(ctx, [pTop, pUpperR, pCenter], 'rgba(51, 65, 85, 0.5)', null);
+                drawFacet(ctx, [pTop, pUpperL, pCenter], 'rgba(30, 41, 59, 0.4)', null);
+                drawFacet(ctx, [pUpperR, pLowerR, pCenter], 'rgba(15, 23, 42, 0.6)', null);
+                drawFacet(ctx, [pUpperL, pLowerL, pCenter], 'rgba(15, 23, 42, 0.7)', null);
+                drawFacet(ctx, [pBottom, pLowerL, pCenter], 'rgba(11, 17, 32, 0.9)', null);
+                drawFacet(ctx, [pBottom, pLowerR, pCenter], 'rgba(11, 17, 32, 0.9)', null);
+                ctx.beginPath();
+                ctx.moveTo(pTop[0], pTop[1]); ctx.lineTo(pCenter[0], pCenter[1]);
+                ctx.moveTo(pBottom[0], pBottom[1]); ctx.lineTo(pCenter[0], pCenter[1]);
+                ctx.moveTo(pUpperL[0], pUpperL[1]); ctx.lineTo(pCenter[0], pCenter[1]);
+                ctx.moveTo(pUpperR[0], pUpperR[1]); ctx.lineTo(pCenter[0], pCenter[1]);
+                ctx.strokeStyle = lineCol; ctx.lineWidth = 2.0; ctx.stroke();
+                drawDiceText(ctx, val, 0, -R * 0.05, String(val).length > 1 ? R * 0.44 : R * 0.52);
+            },
+            d12(ctx, R, lineCol, val) {
+                const outerPts = [];
+                for(let i=0; i<10; i++) {
+                    const ang = (i * 36 - 90) * Math.PI / 180;
+                    outerPts.push([R * Math.cos(ang), R * Math.sin(ang)]);
+                }
+                drawFacet(ctx, outerPts, '#0b1120', lineCol, 3.5);
+                const innerPts = [];
+                for(let i=0; i<5; i++) {
+                    const ang = (i * 72 - 90) * Math.PI / 180;
+                    innerPts.push([R * 0.56 * Math.cos(ang), R * 0.56 * Math.sin(ang)]);
+                }
+                drawFacet(ctx, innerPts, 'rgba(30, 41, 59, 0.65)', lineCol, 2.2);
+                ctx.beginPath();
+                for(let i=0; i<5; i++) {
+                    ctx.moveTo(innerPts[i][0], innerPts[i][1]);
+                    ctx.lineTo(outerPts[i * 2][0], outerPts[i * 2][1]);
+                }
+                ctx.strokeStyle = lineCol; ctx.lineWidth = 1.8; ctx.stroke();
+                drawDiceText(ctx, val, 0, 0, R * 0.46);
+            },
+            d20(ctx, R, lineCol, val) {
+                const hexPts = [];
+                for(let i=0; i<6; i++) {
+                    const ang = (i * 60 - 30) * Math.PI / 180;
+                    hexPts.push([R * Math.cos(ang), R * Math.sin(ang)]);
+                }
+                drawFacet(ctx, hexPts, '#0b1120', lineCol, 3.5);
+                const triPts = [[0, -R * 0.65], [R * 0.56, R * 0.32], [-R * 0.56, R * 0.32]];
+                drawFacet(ctx, triPts, 'rgba(51, 65, 85, 0.55)', lineCol, 2.2);
+                ctx.beginPath();
+                ctx.moveTo(triPts[0][0], triPts[0][1]); ctx.lineTo(hexPts[0][0], hexPts[0][1]);
+                ctx.moveTo(triPts[0][0], triPts[0][1]); ctx.lineTo(hexPts[1][0], hexPts[1][1]);
+                ctx.moveTo(triPts[1][0], triPts[1][1]); ctx.lineTo(hexPts[2][0], hexPts[2][1]);
+                ctx.moveTo(triPts[1][0], triPts[1][1]); ctx.lineTo(hexPts[3][0], hexPts[3][1]);
+                ctx.moveTo(triPts[2][0], triPts[2][1]); ctx.lineTo(hexPts[4][0], hexPts[4][1]);
+                ctx.moveTo(triPts[2][0], triPts[2][1]); ctx.lineTo(hexPts[5][0], hexPts[5][1]);
+                ctx.strokeStyle = lineCol; ctx.lineWidth = 1.8; ctx.stroke();
+                drawDiceText(ctx, val, 0, 0, R * 0.46);
+            }
+        };
+
+        function renderDiceStyle(p, w, h, currentLineColor) {
+            const diceCount = rollConfig.diceList.length;
+            const layout = getMultiElementLayout(diceCount, w, h);
+
+            rollConfig.diceList.forEach((dice, i) => {
+                const pos = layout[i];
+                const R = pos.r;
+                let sx = 1.0, sy = 1.0, rot = 0.0, displayVal = dice.display, opacity = 1.0;
+                const seedX = (i + 1) * 2.1;
+                const seedY = (i + 1) * 3.7;
+
+                if (p < 0.28) {
+                    const normP = p / 0.28;
+                    sx = Math.cos(normP * 14 * Math.PI + seedX);
+                    sy = Math.cos(normP * 11 * Math.PI + seedY);
+                    rot = Math.sin(normP * 8 * Math.PI + seedX) * 0.22;
+                    const max = dice.sectors || 10;
+                    if (dice.isTens) {
+                        displayVal = String(Math.floor(Math.random() * 10) * 10);
+                    } else if (dice.type === 'd2') {
+                        displayVal = Math.random() > 0.5 ? '正' : '反';
+                    } else {
+                        displayVal = String(Math.floor(Math.random() * max) + 1);
+                    }
+                } else if (p < 0.34) {
+                    const settleP = (p - 0.28) / 0.06;
+                    const bounce = 1 + 1.8 * Math.pow(settleP - 1, 3) + 1.2 * Math.pow(settleP - 1, 2);
+                    sx = Math.min(1.15, Math.max(0.1, bounce));
+                    sy = Math.min(1.15, Math.max(0.1, bounce));
+                } else {
+                    sx = 1.0; sy = 1.0; rot = 0.0;
+                    if (dice.isDiscarded) opacity = 0.30;
+                }
+
+                ctx.save();
+                ctx.translate(pos.x, pos.y);
+                ctx.globalAlpha = opacity;
+                ctx.rotate(rot);
+                ctx.scale(sx, sy);
+
+                if (p >= 0.75 && !dice.isDiscarded) {
+                    ctx.shadowColor = currentLineColor;
+                    ctx.shadowBlur = 18;
+                }
+
+                const renderer = DiceRenderers[dice.type] || DiceRenderers.d6;
+                renderer(ctx, R, dice.isDiscarded ? '#475569' : currentLineColor, displayVal);
+
+                if (dice.isDiscarded && p >= 0.34) {
+                    ctx.beginPath();
+                    ctx.moveTo(-R * 0.7, -R * 0.7); ctx.lineTo(R * 0.7, R * 0.7);
+                    ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 4; ctx.stroke();
+                }
+
+                if (dice.isChosen && rollConfig.diceList.length > 2 && p >= 0.34 && !dice.isDiscarded) {
+                    ctx.beginPath(); ctx.arc(0, 0, R * 1.15, 0, Math.PI * 2);
+                    ctx.strokeStyle = currentLineColor; ctx.lineWidth = 2.5; ctx.setLineDash([8, 6]); ctx.stroke();
+                }
+                ctx.restore();
+            });
+        }
+
+        /* ================= 5. 风格 B: 命运多表盘阵列 (绝对指针对齐算法) ================= */
+        function renderRouletteStyle(p, w, h, currentLineColor) {
+            const diceCount = rollConfig.diceList.length;
+            const layout = getMultiElementLayout(diceCount, w, h, true);
+
+            rollConfig.diceList.forEach((dice, i) => {
+                const pos = layout[i];
+                const R = pos.r;
+                const N = dice.sectors || 10;
+                const k = dice.chosenIdx; // 0 ~ N-1
+
+                // ★ 精准角度数学证明：扇区中心对齐正上方 -PI/2
+                const sliceAng = (Math.PI * 2) / N;
+                const settleAngle = -Math.PI / 2 - (k + 0.5) * sliceAng;
+
+                let curAngle = settleAngle;
+                let opacity = 1.0;
+
+                if (p < 0.32) {
+                    const normP = p / 0.32;
+                    const spinEase = 1 - Math.pow(1 - normP, 3);
+                    const totalSpin = (12 + i * 4) * Math.PI * 2;
+                    curAngle = settleAngle + (1 - spinEase) * totalSpin;
+                } else {
+                    if (dice.isDiscarded) opacity = 0.35;
+                }
+
+                ctx.save();
+                ctx.translate(pos.x, pos.y);
+                ctx.globalAlpha = opacity;
+
+                // 1. 绘制表盘背景与分面扇区
+                ctx.save();
+                ctx.rotate(curAngle);
+                for (let idx = 0; idx < N; idx++) {
+                    const a0 = idx * sliceAng;
+                    const a1 = (idx + 1) * sliceAng;
+
+                    ctx.beginPath();
+                    ctx.arc(0, 0, R, a0, a1);
+                    ctx.arc(0, 0, R * 0.35, a1, a0, true);
+                    ctx.closePath();
+
+                    const isTarget = (idx === k);
+                    if (isTarget && p >= 0.75 && !dice.isDiscarded) {
+                        ctx.fillStyle = 'rgba(30, 58, 138, 0.9)';
+                    } else {
+                        ctx.fillStyle = (idx % 2 === 0) ? '#0f172a' : '#1e293b';
+                    }
+                    ctx.fill();
+
+                    ctx.strokeStyle = isTarget && p >= 0.75 && !dice.isDiscarded ? currentLineColor : '#334155';
+                    ctx.lineWidth = isTarget ? 2.5 : 1.5;
+                    ctx.stroke();
+
+                    // 文字沿扇区中轴线居中绘制
+                    const midA = a0 + sliceAng / 2;
+                    const midR = R * 0.68;
+                    ctx.save();
+                    ctx.translate(Math.cos(midA) * midR, Math.sin(midA) * midR);
+                    ctx.rotate(midA + Math.PI / 2);
+                    ctx.fillStyle = (isTarget && p >= 0.75 && !dice.isDiscarded) ? currentLineColor : '#f8fafc';
+                    ctx.font = `900 ${R > 70 ? 18 : (R > 50 ? 14 : 11)}px "JetBrains Mono", sans-serif`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(dice.sectorItems[idx], 0, 0);
+                    ctx.restore();
+                }
+
+                // 表盘黄金铆钉外圈
+                ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2);
+                ctx.strokeStyle = '#334155'; ctx.lineWidth = 3; ctx.stroke();
+                for (let idx = 0; idx < N; idx++) {
+                    const a = idx * sliceAng;
+                    ctx.beginPath();
+                    ctx.arc(Math.cos(a) * R, Math.sin(a) * R, 3, 0, Math.PI * 2);
+                    ctx.fillStyle = '#f59e0b'; ctx.fill();
+                }
+                ctx.restore();
+
+                // 2. 中央轴承显示当前选定值
+                ctx.beginPath(); ctx.arc(0, 0, R * 0.32, 0, Math.PI * 2);
+                ctx.fillStyle = '#070d1a'; ctx.fill();
+                ctx.strokeStyle = (p >= 0.75 && !dice.isDiscarded) ? currentLineColor : '#475569';
+                ctx.lineWidth = 2.5; ctx.stroke();
+                drawDiceText(ctx, dice.display, 0, 0, R * 0.28, (p >= 0.75 && !dice.isDiscarded) ? currentLineColor : '#fff');
+
+                // 3. 顶部固定指示针 (绝对对准正上方扇区中心)
+                const wiggle = (p < 0.32) ? Math.sin(p * 50 + i) * 0.18 : 0;
+                drawPrecisePointer(ctx, 0, -R, dice.isDiscarded ? '#64748b' : '#f59e0b', wiggle, R);
+
+                // 4. 表盘顶部小标牌 (如 D4#1, D6#2, 十位#1)
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = 'bold 12px "Segoe UI", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(dice.label, 0, R + 18);
+
+                // 5. 废弃标记 (奖惩骰/劣势骰打叉)
+                if (dice.isDiscarded && p >= 0.34) {
+                    ctx.beginPath();
+                    ctx.moveTo(-R * 0.6, -R * 0.6); ctx.lineTo(R * 0.6, R * 0.6);
+                    ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 4; ctx.stroke();
+                    ctx.fillStyle = '#ef4444';
+                    ctx.font = '900 13px sans-serif';
+                    ctx.fillText('✕ 弃用', 0, R + 34);
+                }
+
+                ctx.restore();
+            });
+        }
+
+        // 精准针尖与扇区指示箭头
+        function drawPrecisePointer(ctx, x, y, color, wiggle, R) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(wiggle);
+
+            const ptrSize = Math.max(12, R * 0.22);
+            ctx.beginPath();
+            ctx.moveTo(0, ptrSize * 0.9);      // 针尖深入扇区
+            ctx.lineTo(-ptrSize * 0.5, -ptrSize * 0.4);
+            ctx.lineTo(ptrSize * 0.5, -ptrSize * 0.4);
+            ctx.closePath();
+
+            ctx.fillStyle = color;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = 10;
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        /* ================= 6. 风格 C: 多轴赛博老虎机 (每个骰子独立滚轮) ================= */
+        function renderSlotStyle(p, w, h, currentLineColor) {
+            const cx = w / 2;
+            const cy = h / 2 + 15;
+            const diceList = rollConfig.diceList;
+            const count = diceList.length;
+
+            // 机箱外壳宽度自适应
+            const boxWidth = Math.min(370, Math.max(260, count * 75 + 40));
+            const boxHeight = 260;
+
+            ctx.save();
+            ctx.fillStyle = '#0b1120';
+            ctx.fillRect(cx - boxWidth / 2, cy - boxHeight / 2, boxWidth, boxHeight);
+            ctx.strokeStyle = currentLineColor;
+            ctx.lineWidth = 4;
+            if (p >= 0.75) {
+                ctx.shadowColor = currentLineColor;
+                ctx.shadowBlur = 25;
+            }
+            ctx.strokeRect(cx - boxWidth / 2, cy - boxHeight / 2, boxWidth, boxHeight);
+
+            // 顶部霓虹老虎机铭牌
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(cx - boxWidth / 2 + 20, cy - boxHeight / 2 - 28, boxWidth - 40, 32);
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(cx - boxWidth / 2 + 20, cy - boxHeight / 2 - 28, boxWidth - 40, 32);
+            ctx.fillStyle = '#f59e0b';
+            ctx.font = '900 15px "JetBrains Mono", monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('✦ SEAL DICE MULTI-SLOTS ✦', cx, cy - boxHeight / 2 - 7);
+
+            // 滚轮列宽度
+            const reelWidth = (boxWidth - 30) / count;
+            const startX = cx - (boxWidth - 30) / 2;
+
+            diceList.forEach((dice, idx) => {
+                const rx = startX + idx * reelWidth + reelWidth / 2;
+                const ry = cy;
+                const stopTime = 0.22 + idx * 0.04;
+                const isRolling = (p < stopTime);
+
+                // 视口裁剪
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(rx - reelWidth / 2 + 3, ry - 95, reelWidth - 6, 190);
+                ctx.clip();
+
+                ctx.fillStyle = dice.isDiscarded ? '#050811' : '#070d1a';
+                ctx.fillRect(rx - reelWidth / 2 + 3, ry - 95, reelWidth - 6, 190);
+
+                if (isRolling) {
+                    const speedOffset = (p * 4500 * (idx + 1)) % 140;
+                    for (let n = -2; n <= 3; n++) {
+                        const drawY = ry + n * 60 + speedOffset - 60;
+                        const randVal = Math.floor(Math.random() * dice.sectors) * (dice.isTens ? 10 : 1);
+                        ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
+                        ctx.font = 'bold 30px "JetBrains Mono", monospace';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(String(randVal), rx, drawY);
+                    }
+                } else {
+                    const settleElapsed = p - stopTime;
+                    let bounceY = 0;
+                    if (settleElapsed < 0.06) {
+                        bounceY = Math.sin(settleElapsed / 0.06 * Math.PI) * 12;
+                    }
+
+                    // 居中定格数字
+                    ctx.fillStyle = dice.isDiscarded ? '#475569' : (p >= 0.75 ? currentLineColor : '#f8fafc');
+                    ctx.font = `900 ${reelWidth > 70 ? 38 : (reelWidth > 50 ? 28 : 22)}px "JetBrains Mono", monospace`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(dice.display, rx, ry + bounceY);
+
+                    // 上下辅助虚影
+                    ctx.fillStyle = 'rgba(71, 85, 105, 0.35)';
+                    ctx.font = 'bold 20px "JetBrains Mono", monospace';
+                    ctx.fillText(String((dice.value + 1) % 100), rx, ry - 55 + bounceY);
+                    ctx.fillText(String((dice.value + 99) % 100), rx, ry + 55 + bounceY);
+
+                    if (dice.isDiscarded) {
+                        ctx.beginPath();
+                        ctx.moveTo(rx - 25, ry - 25); ctx.lineTo(rx + 25, ry + 25);
+                        ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 3.5; ctx.stroke();
+                    }
+                }
+
+                ctx.restore();
+
+                // 单滚轮分割线框与顶部类型标记
+                ctx.strokeStyle = '#1e293b';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(rx - reelWidth / 2 + 3, ry - 95, reelWidth - 6, 190);
+
+                ctx.fillStyle = dice.isDiscarded ? '#ef4444' : '#38bdf8';
+                ctx.font = 'bold 11px "Segoe UI", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(dice.label, rx, ry - 102);
+            });
+
+            // 贯穿中轴的激光锁定中奖线 (Payline)
+            ctx.beginPath();
+            ctx.moveTo(cx - boxWidth / 2 + 10, cy); ctx.lineTo(cx + boxWidth / 2 - 10, cy);
+            ctx.strokeStyle = p >= 0.75 ? currentLineColor : 'rgba(245, 158, 11, 0.6)';
+            ctx.lineWidth = 3;
+            ctx.setLineDash([8, 6]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // 中奖线两侧锁定三角
+            ctx.fillStyle = currentLineColor;
+            ctx.beginPath();
+            ctx.moveTo(cx - boxWidth / 2 + 6, cy - 7); ctx.lineTo(cx - boxWidth / 2 + 18, cy); ctx.lineTo(cx - boxWidth / 2 + 6, cy + 7);
+            ctx.moveTo(cx + boxWidth / 2 - 6, cy - 7); ctx.lineTo(cx + boxWidth / 2 - 18, cy); ctx.lineTo(cx + boxWidth / 2 - 6, cy + 7);
+            ctx.fill();
+
+            // 若有固定修正值 (+3)，在右下角标出
+            if (rollConfig.modifier !== 0) {
+                ctx.fillStyle = '#f59e0b';
+                ctx.font = 'bold 14px "JetBrains Mono", monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText(`加值: +${rollConfig.modifier}`, cx + boxWidth / 2 - 10, cy + boxHeight / 2 - 10);
+            }
+
+            ctx.restore();
+        }
+
+        /* 通用网格/横排自适应排版生成器 */
+        function getMultiElementLayout(count, w, h, isDial = false) {
+            const list = [];
+            const cy = h / 2 + 12;
+
+            if (count === 1) {
+                list.push({ x: w / 2, y: cy, r: isDial ? 120 : 125 });
+            } else if (count === 2) {
+                const offset = isDial ? 90 : 82;
+                list.push({ x: w / 2 - offset, y: cy, r: isDial ? 80 : 100 });
+                list.push({ x: w / 2 + offset, y: cy, r: isDial ? 80 : 100 });
+            } else if (count === 3) {
+                const offset = isDial ? 115 : 125;
+                list.push({ x: w / 2 - offset, y: cy, r: isDial ? 56 : 80 });
+                list.push({ x: w / 2, y: cy, r: isDial ? 56 : 80 });
+                list.push({ x: w / 2 + offset, y: cy, r: isDial ? 56 : 80 });
+            } else if (count === 4) {
+                const offX = isDial ? 90 : 85, offY = isDial ? 70 : 70;
+                list.push({ x: w / 2 - offX, y: cy - offY, r: isDial ? 54 : 75 });
+                list.push({ x: w / 2 + offX, y: cy - offY, r: isDial ? 54 : 75 });
+                list.push({ x: w / 2 - offX, y: cy + offY, r: isDial ? 54 : 75 });
+                list.push({ x: w / 2 + offX, y: cy + offY, r: isDial ? 54 : 75 });
+            } else {
+                const spacingX = isDial ? 110 : 110;
+                const offY = isDial ? 68 : 65;
+                for (let i = 0; i < count; i++) {
+                    const row = Math.floor(i / 3);
+                    const col = i % 3;
+                    list.push({
+                        x: w / 2 + (col - 1) * spacingX,
+                        y: cy + (row === 0 ? -offY : offY),
+                        r: isDial ? 44 : 65
+                    });
+                }
+            }
+            return list;
+        }
+
+        /* ================= 7. 全屏高能特效库 (大失败碎屏/大成功日芒等) ================= */
+        function renderFumbleGlassShatterFX(ctx, w, h, intensity) {
+            ctx.save();
+            ctx.globalAlpha = intensity;
+            const cx = w / 2, cy = h / 2 + 10;
+
+            const grad = ctx.createRadialGradient(cx, cy, 10, cx, cy, 320);
+            grad.addColorStop(0, 'rgba(40, 0, 10, 0.9)');
+            grad.addColorStop(0.5, 'rgba(15, 0, 5, 0.6)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, w, h);
+
+            // 克苏鲁暗黑触手钻出
+            const tentacleCount = 5;
+            for (let i = 0; i < tentacleCount; i++) {
+                const ang = (i * (Math.PI * 2) / tentacleCount) + 0.3;
+                const len = 160 * intensity;
+                const tx = cx + Math.cos(ang) * len, ty = cy + Math.sin(ang) * len;
+                const cpx = cx + Math.cos(ang + 0.6) * (len * 0.7), cpy = cy + Math.sin(ang + 0.6) * (len * 0.7);
+
+                ctx.beginPath();
+                ctx.moveTo(cx, cy); ctx.quadraticCurveTo(cpx, cpy, tx, ty);
+                ctx.strokeStyle = '#180206'; ctx.lineWidth = 14 * intensity; ctx.lineCap = 'round'; ctx.stroke();
+                ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2.5; ctx.stroke();
+            }
+
+            // 碎裂玻璃蜘蛛网
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+            ctx.shadowColor = '#ef4444'; ctx.shadowBlur = 8; ctx.lineWidth = 2.5;
+            const crackSeeds = [0.2, 0.9, 1.8, 2.7, 3.6, 4.4, 5.3];
+            crackSeeds.forEach(ang => {
+                ctx.beginPath(); ctx.moveTo(cx, cy);
+                let curX = cx, curY = cy;
+                for (let step = 0; step < 4; step++) {
+                    const segLen = 50 + step * 25;
+                    const jitter = (step % 2 === 0 ? 0.2 : -0.2);
+                    curX += Math.cos(ang + jitter) * segLen;
+                    curY += Math.sin(ang + jitter) * segLen;
+                    ctx.lineTo(curX, curY);
+                }
+                ctx.stroke();
+            });
+
+            [80, 160, 260].forEach(r => {
+                ctx.beginPath();
+                for (let i = 0; i <= 8; i++) {
+                    const a = (i * Math.PI * 2) / 8;
+                    const cr = r + (i % 2 === 0 ? 15 : -15);
+                    const px = cx + Math.cos(a) * cr, py = cy + Math.sin(a) * cr;
+                    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                }
+                ctx.closePath(); ctx.stroke();
+            });
+            ctx.restore();
+        }
+
+        function renderCritSunburstFX(ctx, w, h, intensity) {
+            ctx.save();
+            ctx.globalAlpha = intensity;
+            const cx = w / 2, cy = h / 2 + 10;
+            const rays = 14;
+            for (let i = 0; i < rays; i++) {
+                const ang = (i * Math.PI * 2) / rays;
+                ctx.beginPath(); ctx.moveTo(cx, cy);
+                ctx.arc(cx, cy, 360, ang, ang + 0.14);
+                ctx.closePath();
+                ctx.fillStyle = (i % 2 === 0) ? 'rgba(245, 158, 11, 0.14)' : 'rgba(251, 191, 36, 0.06)';
+                ctx.fill();
+            }
+            ctx.beginPath(); ctx.arc(cx, cy, 140, 0, Math.PI * 2);
+            ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 3; ctx.shadowColor = '#f59e0b'; ctx.shadowBlur = 20; ctx.stroke();
+            ctx.restore();
+        }
+
+        function renderArcaneShockwaveFX(ctx, w, h, intensity, color) {
+            ctx.save();
+            ctx.globalAlpha = intensity;
+            const cx = w / 2, cy = h / 2 + 10;
+            [100, 160, 220].forEach((baseR, idx) => {
+                const r = baseR + idx * 20 * (1 - intensity);
+                ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.shadowColor = color; ctx.shadowBlur = 16;
+                ctx.setLineDash([12, 10]); ctx.stroke();
+            });
+            ctx.restore();
+        }
+
+        function renderSuccessEmeraldFX(ctx, w, h, intensity) {
+            ctx.save();
+            ctx.globalAlpha = intensity;
+            const cx = w / 2, cy = h / 2 + 10;
+            const grad = ctx.createRadialGradient(cx, cy, 30, cx, cy, 200);
+            grad.addColorStop(0, 'rgba(16, 185, 129, 0.22)');
+            grad.addColorStop(0.7, 'rgba(16, 185, 129, 0.05)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, w, h);
+            ctx.beginPath(); ctx.arc(cx, cy, 130, 0, Math.PI * 2);
+            ctx.strokeStyle = '#10b981'; ctx.lineWidth = 2.5; ctx.shadowColor = '#10b981'; ctx.shadowBlur = 15; ctx.stroke();
+            ctx.restore();
+        }
+
+        /* ================= 8. 主时间轴驱动 ================= */
+        function renderFrame(p) {
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+
+            ctx.fillStyle = '#03060c';
+            ctx.fillRect(0, 0, w, h);
+
+            // 0.65 -> 0.85 平滑渐变过渡
+            let currentLineColor = '#64748b';
+            if (p < 0.65) {
+                currentLineColor = '#94a3b8';
+            } else if (p < 0.85) {
+                const t = (p - 0.65) / 0.20;
+                currentLineColor = lerpColor('#94a3b8', rollConfig.targetColor, t);
+            } else {
+                currentLineColor = rollConfig.targetColor;
+            }
+
+            // 0.75 悬念揭晓后触发全屏背景特效
+            if (p >= 0.75) {
+                const fxIntensity = Math.min(1.0, (p - 0.75) / 0.15);
+                if (rollConfig.rankType === 'fumble') {
+                    renderFumbleGlassShatterFX(ctx, w, h, fxIntensity);
+                } else if (rollConfig.rankType === 'crit') {
+                    renderCritSunburstFX(ctx, w, h, fxIntensity);
+                } else if (rollConfig.rankType === 'extreme' || rollConfig.rankType === 'hard') {
+                    renderArcaneShockwaveFX(ctx, w, h, fxIntensity, rollConfig.targetColor);
+                } else if (rollConfig.rankType === 'success') {
+                    renderSuccessEmeraldFX(ctx, w, h, fxIntensity);
+                }
+            }
+
+            // 分支风格渲染
+            if (visualStyle === 'dice') {
+                renderDiceStyle(p, w, h, currentLineColor);
+            } else if (visualStyle === 'roulette') {
+                renderRouletteStyle(p, w, h, currentLineColor);
+            } else if (visualStyle === 'slot') {
+                renderSlotStyle(p, w, h, currentLineColor);
+            }
+
+            drawTopHeader();
+
+            if (p >= 0.75) {
+                const alpha = Math.min(1.0, (p - 0.75) / 0.12);
+                drawRevealHUD(alpha);
+            }
+        }
+
+        function drawTopHeader() {
+            const w = canvas.width;
+            ctx.save();
+            ctx.fillStyle = 'rgba(7, 10, 18, 0.9)';
+            ctx.fillRect(40, 32, w - 80, 72);
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(40, 32, w - 80, 72);
+
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = 'bold 28px "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`【海豹骰】${rollConfig.title}`, w / 2, 78);
+            ctx.restore();
+        }
+
+        function drawRevealHUD(alpha) {
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.save();
+            ctx.globalAlpha = alpha;
+
+            ctx.strokeStyle = rollConfig.targetColor;
+            ctx.lineWidth = 10;
+            ctx.shadowColor = rollConfig.targetColor;
+            ctx.shadowBlur = 30;
+            ctx.strokeRect(8, 8, w - 16, h - 16);
+
+            ctx.fillStyle = 'rgba(7, 10, 18, 0.95)';
+            ctx.fillRect(40, h - 130, w - 80, 92);
+            ctx.strokeStyle = rollConfig.targetColor;
+            ctx.lineWidth = 3.5;
+            ctx.strokeRect(40, h - 130, w - 80, 92);
+
+            ctx.fillStyle = rollConfig.targetColor;
+            ctx.font = '900 32px "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+
+            if (rollConfig.mode === 'coc') {
+                ctx.fillText(`1D100 = ${rollConfig.finalTotal} / ${rollConfig.target} 【${rollConfig.rankText.split(' ')[0]}】`, w / 2, h - 72);
+            } else if (rollConfig.mode === 'dnd') {
+                ctx.fillText(`D20 = ${rollConfig.finalTotal} (DC ${rollConfig.target}) 【${rollConfig.rankText.split(' ')[0]}】`, w / 2, h - 72);
+            } else {
+                ctx.fillText(`投掷结果: ${rollConfig.finalTotal} 【${rollConfig.rankText}】`, w / 2, h - 72);
+            }
+            ctx.restore();
+        }
+
+        /* ================= 9. 动效播放与高质量 GIF 导出 ================= */
+        let animTimer = null;
+        function playAnimation() {
+            if (animTimer) cancelAnimationFrame(animTimer);
+            const startTime = performance.now();
+            const totalDuration = 3400; // 3.4 秒
+
+            function loop(now) {
+                const elapsed = now - startTime;
+                const p = Math.min(1.0, elapsed / totalDuration);
+                renderFrame(p);
+                if (p < 1.0) {
+                    animTimer = requestAnimationFrame(loop);
+                }
+            }
+            animTimer = requestAnimationFrame(loop);
+        }
+
+        function generateGIF() {
+            const btn = document.getElementById('btnGif');
+            const pBar = document.getElementById('progressBar');
+            const pInner = document.getElementById('progressInner');
+            const status = document.getElementById('statusTip');
+
+            btn.disabled = true;
+            pBar.style.display = 'block';
+            status.innerText = '正在逐帧抓取超清画面与高能特效...';
+
+            const frames = [];
+            const totalFrames = 34;
+
+            for (let i = 0; i <= totalFrames; i++) {
+                const p = i / totalFrames;
+                renderFrame(p);
+                frames.push(canvas.toDataURL('image/png'));
+            }
+
+            status.innerText = '正在压制高画质 GIF 动图...';
+            pInner.style.width = '60%';
+
+            gifshot.createGIF({
+                images: frames,
+                gifWidth: 400,
+                gifHeight: 400,
+                interval: 0.1,
+                numWorkers: 4,
+                sampleInterval: 8
+            }, function(obj) {
+                pBar.style.display = 'none';
+                btn.disabled = false;
+                if (!obj.error) {
+                    const image = obj.image;
+                    status.innerText = '✨ 高清 GIF 导出完成！已渲染完整视效。';
+                    const wrapper = document.getElementById('gif-result-wrapper');
+                    const preview = document.getElementById('gif-preview');
+                    const link = document.getElementById('downloadLink');
+
+                    wrapper.style.display = 'flex';
+                    preview.src = image;
+                    link.href = image;
+                } else {
+                    status.innerText = '导出失败: ' + obj.error;
+                }
+            });
+        }
+
+        onMainModeChange();
+    </script>
+</body>
+</html>
