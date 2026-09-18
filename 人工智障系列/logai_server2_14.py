@@ -34,15 +34,21 @@ from PIL import Image, ImageColor, ImageDraw, ImageFont
 from openai import OpenAI
 # 新增依赖
 import PyPDF2
+try:
+    import pymupdf as fitz
+except ImportError:
+    try:
+        import fitz
+    except ImportError:
+        fitz = None
+import docx
+from docx import Document
 import urllib.parse
 import zipfile
 import shutil
 import hashlib
 import datetime
 import textwrap
-
-# 原有的 imports 保持不变...
-from docx import Document
 try:
     from sheet_importer import extract_import_card
 except ImportError:
@@ -275,6 +281,7 @@ DEFAULT_SYSTEM_PROMPT = """
 # ================= 跑团/带团风格深度分析模式（v2.13 新增） =================
 PLAYER_STYLE_SYSTEM_PROMPT = """你是一位阅历极深、洞察力敏锐的资深 TRPG 观察家与跑团首席评审官（精通 COC、DND 等多种主流跑团规则）。
 你的任务是：根据提供的跑团 Log 日志（可能是单个文件，也可能是多场次/多章节拼接而成的链接集合），聚焦分析指定对象（目标玩家/主持，可能是 QQ 账号或角色名/昵称）在团内的真实表现，深入剖析其【跑团风格】或【带团风格】，并给出极具专业度、洞察力与跑团风味的客观评价。
+（特别注意：当日志由多段拼接而成时，系统已自动按时间戳将其从早到晚严格正序排列，各段头部标注有实际时间跨度。请你重点结合时间轴，深度观察该对象随着时间推移的风格变化、角色演绎成熟度与经验演化历程）。
 
 【极其重要的身份研判与大标题指令】：
 在深入分析前，请务必通读该用户在日志中的真实言行细节做出独立研判（不要受外界干扰，后端提供的统计仅作线索参考，你作为通读全篇的主考官拥有最终身份裁决权）：
@@ -305,13 +312,13 @@ PLAYER_STYLE_SYSTEM_PROMPT = """你是一位阅历极深、洞察力敏锐的资
   1. 角色扮演与演绎流派：是沉浸式剧情派（内心戏足、台词有文采、严守角色动机）、战术理智派（求生欲强、战术最优解、利用规则机制）、乐子搞笑派（活跃气氛、出人意料）、还是社交嘴炮派（交涉拉扯、探索人性）？
   2. 决策模式与行动偏好：面对未知与危机时，倾向于深思熟虑谨慎侦查，还是果断莽撞敢打敢冲？对线索与细节的敏感度如何？
   3. 团队协作与交互情商：是善于倾听队友、为他人搭戏搭桥，还是倾向独立独行，抑或偶尔有抢戏/脱节倾向？
-  4. 风格是否在团内有强烈的变化？如果有多个log，其在log中的风格发挥稳定性如何，是否有进步或是退步？
+  4. 风格是否在团内有强烈的变化？如果有多个log，其在时间轴（从早到晚）中的风格发挥稳定性如何，是否有明显的进步或退步？
 ▶ 若为 KP 带团风格：
   1. 叙事文风与氛围营造：描写是否具画面感与电影感？对恐怖/史诗/悬疑氛围的渲染力如何？文字张力与修辞水平。
   2. 控场节奏与剧情推进：是紧凑利落的主线推进，还是宽松沙盒允许自由探索？会否让场面拖沓或冷场？
   3. NPC 塑造与互动生动度：NPC 是否性格鲜明有智商，还是工具人化？与玩家互动时的代入感如何？
   4. 裁决尺度与应对突变：倾向于硬核原教旨守规，还是戏剧导向/宽容放水？面对玩家脱轨或突发奇想时，能否化解并转化为精彩剧情？
-  5. 风格是否在团内有强烈的变化？如果有多个log，其在log中的风格发挥稳定性如何，是否有进步或是退步？
+  5. 风格是否在团内有强烈的变化？如果有多个log，其在时间轴（从早到晚）中的风格发挥稳定性如何，是否有明显的进步或退步？
 （该部分请务必严肃客观尖锐的评价，无需担心评价会伤害到其自尊心）
 
 【分页符】
@@ -583,6 +590,2576 @@ def delete_user_cards(user_key: str, name: str = "", clear_all: bool = False,
 def load_group_cards(user_key: str = "") -> list:
     return load_user_cards(user_key)
 
+# ================= 原始日志持久化存储与玩家跑团/带团风格成长档案系统 =================
+RAW_LOGS_DIR = "raw_logs_store"
+STYLE_ARCHIVES_DIR = "player_style_archives"
+
+def save_raw_log(source: str, key: str, data):
+    """持久化保存原始日志副本至 raw_logs_store/，方便随时调用与免重复网络请求"""
+    try:
+        os.makedirs(RAW_LOGS_DIR, exist_ok=True)
+        safe_k = _sanitize_filename(str(key or 'unknown'))
+        safe_s = _sanitize_filename(str(source or 'unknown').lower())
+        if isinstance(data, (dict, list)):
+            file_path = os.path.join(RAW_LOGS_DIR, f"{safe_s}_{safe_k}.json")
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        else:
+            file_path = os.path.join(RAW_LOGS_DIR, f"{safe_s}_{safe_k}.txt")
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(str(data or ''))
+    except Exception as e:
+        print(f"[原始Log存储] 保存异常 {source}:{key} -> {e}")
+
+def load_raw_log(source: str, key: str):
+    """尝试从 raw_logs_store/ 读取已持久化的原始日志"""
+    try:
+        if not os.path.isdir(RAW_LOGS_DIR):
+            return None
+        safe_k = _sanitize_filename(str(key or 'unknown'))
+        safe_s = _sanitize_filename(str(source or 'unknown').lower())
+        json_path = os.path.join(RAW_LOGS_DIR, f"{safe_s}_{safe_k}.json")
+        if os.path.isfile(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        txt_path = os.path.join(RAW_LOGS_DIR, f"{safe_s}_{safe_k}.txt")
+        if os.path.isfile(txt_path):
+            with open(txt_path, "r", encoding="utf-8") as f:
+                return f.read()
+    except Exception as e:
+        print(f"[原始Log存储] 读取异常 {source}:{key} -> {e}")
+    return None
+
+def _find_linked_qq_by_alias(alias_name: str, base_dir: str = STYLE_ARCHIVES_DIR) -> str:
+    """在档案库中反向查找该角色名/别名绑定的 QQ 号（如有）"""
+    if not alias_name or not os.path.isdir(base_dir):
+        return ""
+    clean_a = re.sub(r'^(?:QQ[:：]|OpenQQ:)?', '', str(alias_name).strip(), flags=re.IGNORECASE).strip()
+    clean_a = re.sub(r'^[,，、\s/|;；]+|[,，、\s/|;；]+$', '', clean_a).strip()
+    if not clean_a or re.match(r'^\d{5,12}$', clean_a):
+        return ""
+    
+    clean_a_low = clean_a.lower()
+    for entry in os.listdir(base_dir):
+        if not re.match(r'^\d{5,12}$', entry):
+            continue
+        edir = os.path.join(base_dir, entry)
+        if not os.path.isdir(edir):
+            continue
+        for sub in ("pl", "kp"):
+            tf = os.path.join(edir, sub, "growth_timeline.json")
+            if os.path.exists(tf):
+                try:
+                    with open(tf, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                    aliases = [str(x).lower() for x in d.get("aliases", []) if x]
+                    target = str(d.get("target", "")).lower()
+                    if clean_a_low in aliases or clean_a_low == target:
+                        return entry
+                    for h in d.get("history", []):
+                        h_t = str(h.get("target", "")).lower()
+                        if clean_a_low == h_t or clean_a_low in [str(x).lower() for x in h.get("aliases", [])]:
+                            return entry
+                except Exception:
+                    pass
+    return ""
+
+def _merge_alias_dir_into_qq(base_dir: str, qq_num: str, alias_name: str):
+    """
+    当确认某个角色别名归属于某 QQ 时，若以往存在以该角色名单独命名的独立档案目录，
+    自动将其中的历史战役记录及成长轨迹合并归入该 QQ 档案目录下，并清理旧角色目录。
+    """
+    if not alias_name or not qq_num or alias_name == qq_num:
+        return
+    clean_alias = _sanitize_filename(str(alias_name).strip())
+    clean_alias = re.sub(r'^[,，、\s/|;；]+|[,，、\s/|;；]+$', '', clean_alias).strip()
+    if not clean_alias or clean_alias == qq_num or clean_alias.startswith("用户_"):
+        return
+    
+    alias_dir = os.path.realpath(os.path.join(base_dir, clean_alias))
+    qq_dir = os.path.realpath(os.path.join(base_dir, qq_num))
+    if not os.path.isdir(alias_dir) or alias_dir == qq_dir:
+        return
+
+    try:
+        # 先确保旧角色目录迁移了 legacy 格式
+        _migrate_legacy_archive_if_needed(alias_dir)
+
+        for sub in ("pl", "kp"):
+            src_sub = os.path.join(alias_dir, sub)
+            if not os.path.isdir(src_sub):
+                continue
+            dst_sub = os.path.join(qq_dir, sub)
+            dst_records = os.path.join(dst_sub, "records")
+            os.makedirs(dst_records, exist_ok=True)
+
+            # 迁移 records 下的文件
+            src_records = os.path.join(src_sub, "records")
+            if os.path.isdir(src_records):
+                for fname in os.listdir(src_records):
+                    src_f = os.path.join(src_records, fname)
+                    dst_f = os.path.join(dst_records, fname)
+                    if not os.path.exists(dst_f):
+                        try:
+                            shutil.move(src_f, dst_f)
+                        except Exception as e_mv:
+                            print(f"[合并档案] 移动记录文件失败 {fname}: {e_mv}")
+
+            # 合并 growth_timeline.json
+            src_tl_path = os.path.join(src_sub, "growth_timeline.json")
+            if os.path.exists(src_tl_path):
+                try:
+                    with open(src_tl_path, "r", encoding="utf-8") as sf:
+                        src_data = json.load(sf)
+                except Exception:
+                    src_data = {}
+
+                dst_tl_path = os.path.join(dst_sub, "growth_timeline.json")
+                dst_data = {
+                    "target": alias_name,
+                    "qq": qq_num,
+                    "role": sub.upper(),
+                    "first_seen": src_data.get("first_seen", ""),
+                    "last_updated": src_data.get("last_updated", ""),
+                    "total_records": 0,
+                    "aliases": [alias_name],
+                    "history": []
+                }
+                if os.path.exists(dst_tl_path):
+                    try:
+                        with open(dst_tl_path, "r", encoding="utf-8") as df:
+                            dst_data = json.load(df)
+                    except Exception:
+                        pass
+
+                # 维护 aliases
+                aliases_list = dst_data.setdefault("aliases", [])
+                if alias_name not in aliases_list:
+                    aliases_list.append(alias_name)
+                for a in src_data.get("aliases", []):
+                    if a and a not in aliases_list:
+                        aliases_list.append(a)
+
+                # 合并 history
+                existing_rec_ids = {h.get("record_id") for h in dst_data.get("history", [])}
+                for h in src_data.get("history", []):
+                    if h.get("record_id") not in existing_rec_ids:
+                        dst_data.setdefault("history", []).append(h)
+                        existing_rec_ids.add(h.get("record_id"))
+
+                # 重新按时间排序 history
+                dst_data["history"].sort(key=lambda x: (x.get("start_t") or 0, x.get("created_at") or ""))
+                dst_data["total_records"] = len(dst_data["history"])
+                
+                # 重新计算 first_seen
+                first_dates = [h.get("created_at", "")[:10] for h in dst_data["history"] if h.get("created_at")]
+                if first_dates:
+                    dst_data["first_seen"] = min(first_dates)
+
+                with open(dst_tl_path, "w", encoding="utf-8") as df:
+                    json.dump(dst_data, df, ensure_ascii=False, indent=2)
+
+        # 尝试清理已被完全合并空的旧目录
+        try:
+            shutil.rmtree(alias_dir)
+            print(f"[合并档案] 已将角色专属历史档案【{clean_alias}】成功合并入 QQ 档案【{qq_num}】并清理旧目录。")
+        except Exception as e_rm:
+            print(f"[合并档案] 清理合并后的旧目录失败: {e_rm}")
+
+    except Exception as e:
+        print(f"[合并档案] 合并目录异常 {clean_alias} -> {qq_num}: {e}")
+
+def _extract_target_dir_name(target_user: str, user_key: str = "") -> tuple:
+    """提取目录名及规范化的 QQ / 名字。优先提取目标中的纯数字 QQ，无数字则使用目标名字，最后回退到发送者 user_key。"""
+    raw = str(target_user or "").strip()
+    m = re.search(r'\b(\d{5,12})\b', raw)
+    clean_user_key = re.sub(r'^(?:QQ[:：]|OpenQQ:)?', '', str(user_key or '').strip(), flags=re.IGNORECASE)
+    u_m = re.search(r'^\d{5,12}$', clean_user_key)
+    
+    if m:
+        qq_num = m.group(1)
+        name_candidate = re.sub(r'\b\d{5,12}\b', '', raw).strip()
+        name_candidate = re.sub(r'^(?:QQ[:：])?', '', name_candidate, flags=re.IGNORECASE).strip()
+        name_candidate = re.sub(r'^[,，、\s/|;；]+|[,，、\s/|;；]+$', '', name_candidate).strip()
+        final_name = name_candidate or f"用户_{qq_num}"
+        return qq_num, final_name, qq_num
+    
+    if raw:
+        clean_raw = re.sub(r'^(?:QQ[:：])?', '', raw, flags=re.IGNORECASE).strip()
+        clean_raw = re.sub(r'^[,，、\s/|;；]+|[,，、\s/|;；]+$', '', clean_raw).strip()
+        # 尝试反向查找绑定的 QQ 号
+        linked_qq = _find_linked_qq_by_alias(clean_raw)
+        if linked_qq:
+            return linked_qq, clean_raw, linked_qq
+
+        safe_name = _sanitize_filename(clean_raw)
+        return safe_name, clean_raw, (clean_user_key if u_m else "")
+    
+    if u_m:
+        return clean_user_key, f"用户_{clean_user_key}", clean_user_key
+        
+    return "unknown", "未知目标", ""
+
+# 标准雷达图维度（与系统提示词 PLAYER_STYLE_SYSTEM_PROMPT 严格对齐）
+PL_RADAR_AXES = ['角色演绎', '逻辑决策', '团队协作', '规则敏锐', '临场应变', '心理抗压']
+KP_RADAR_AXES = ['氛围渲染', '控场节奏', '判定严谨', 'NPC塑造', '突发应变', '玩家体验']
+
+DIMENSION_SYNONYMS = {
+    # PL 维度及同义词/简写
+    '角色演绎': ['角色演绎', '演绎', '扮演', '角色扮演', 'RP', '沉浸演绎', '演绎深度', '戏份投入'],
+    '逻辑决策': ['逻辑决策', '逻辑', '决策', '思维', '推理', '战术思考', '理性决策', '局势判断'],
+    '团队协作': ['团队协作', '团队', '协作', '配合', '交涉', '社交', '沟通协作', '搭戏配合'],
+    '规则敏锐': ['规则敏锐', '规则', '机制', '敏锐', '战术', '规则理解', '技能运用', '战术敏锐'],
+    '临场应变': ['临场应变', '应变', '机敏', '突变应对', '处置', '临场反应', '危机处置'],
+    '心理抗压': ['心理抗压', '抗压', '心理', '意志', '求生欲', '稳健', '心态稳定', '抗压韧性'],
+    # KP 维度及同义词/简写
+    '氛围渲染': ['氛围渲染', '氛围', '渲染', '文风', '描述', '情境烘托', '叙事文风'],
+    '控场节奏': ['控场节奏', '控场', '节奏', '主线推进', '时间把控', '推进效率', '现场把控'],
+    '判定严谨': ['判定严谨', '判定', '严谨', '裁决', '规则裁决', '公正度', '规则尺度'],
+    'NPC塑造': ['NPC塑造', 'NPC', '塑造', '配角演绎', '角色塑造', 'NPC表现', '生动度'],
+    '突发应变': ['突发应变', '突发', '脱轨应对', '临场应变', '变故处置', '圆场能力'],
+    '玩家体验': ['玩家体验', '体验', '互动', '反馈', '代入感', '沉浸感', '玩家参与度'],
+}
+
+def normalize_dimension_name(raw_name: str) -> str:
+    """标准化能力维度名称为系统标准 6 维之一"""
+    clean = re.sub(r'[*_`#:\s【】\[\]()（）]', '', str(raw_name or '')).strip()
+    if not clean:
+        return ""
+    for std, syns in DIMENSION_SYNONYMS.items():
+        if clean == std or clean in syns:
+            return std
+    for std, syns in DIMENSION_SYNONYMS.items():
+        for syn in syns:
+            if syn in clean or clean in syn:
+                return std
+    return clean
+
+def extract_radar_data_from_text(text: str) -> dict:
+    """全面兼容代码块、Markdown 表格、列表项与键值对等多格式六维能力雷达数据抽取"""
+    radar = {}
+    content = text or ''
+
+    # 1. 优先提取 ```logai-chart 或 ```chart 代码块
+    m_code = re.search(r'```(?:logai-chart|chart)?\s*\n(.*?)```', content, re.DOTALL)
+    if m_code:
+        block = m_code.group(1)
+        axes_m = re.search(r'axes\s*[:：]\s*(.+)', block)
+        if axes_m:
+            raw_axes_str = axes_m.group(1).strip()
+            raw_axes = [a.strip() for a in re.split(r'[,，、|/]\s*', raw_axes_str) if a.strip()]
+            norm_axes = [normalize_dimension_name(a) for a in raw_axes]
+            
+            # 查找数值行
+            for line in block.splitlines():
+                if any(c.isdigit() for c in line) and ('|' in line or ':' in line or ',' in line or '，' in line):
+                    nums = re.findall(r'\b\d+\b', line)
+                    if len(nums) == len(norm_axes):
+                        for a, n in zip(norm_axes, nums):
+                            val = min(100, max(0, int(n)))
+                            if a: radar[a] = val
+                        break
+        # 若 axes 未能完全匹配，尝试在代码块内提取 键: 值
+        if len(radar) < 4:
+            for line in block.splitlines():
+                m_kv = re.search(r'([^\d:：\n|]{2,8})\s*[:：]\s*(\d{1,3})', line)
+                if m_kv:
+                    k_std = normalize_dimension_name(m_kv.group(1))
+                    if k_std:
+                        radar[k_std] = min(100, max(0, int(m_kv.group(2))))
+
+    # 2. 若代码块未提取到足够维度，提取 Markdown 表格 (| 角色演绎 | 85 |)
+    if len(radar) < 4:
+        table_rows = re.findall(r'\|\s*([^\d:：|\n]{2,8})\s*\|\s*(\d{1,3})\s*\|', content)
+        for k_raw, v_raw in table_rows:
+            k_std = normalize_dimension_name(k_raw)
+            if k_std:
+                radar[k_std] = min(100, max(0, int(v_raw)))
+
+    # 3. 若仍不足，提取列表项或自然段中的 键值对 (- 角色演绎: 85 或 角色演绎：85分)
+    if len(radar) < 4:
+        kv_pairs = re.findall(r'(?:[-*•]\s*)?([^\d:：\n|()（）]{2,8})\s*[:：]\s*(\d{1,3})(?:\s*分)?\b', content)
+        for k_raw, v_raw in kv_pairs:
+            k_std = normalize_dimension_name(k_raw)
+            if k_std:
+                radar[k_std] = min(100, max(0, int(v_raw)))
+
+    # 4. 横向单行匹配 (角色演绎 85 | 逻辑决策 70 ...)
+    if len(radar) < 4:
+        inline_pairs = re.findall(r'([^\s:：,，|]{2,8})\s*[:：=]?\s*(\d{1,3})\s*(?:分)?', content)
+        for k_raw, v_raw in inline_pairs:
+            k_std = normalize_dimension_name(k_raw)
+            if k_std and k_std not in radar:
+                radar[k_std] = min(100, max(0, int(v_raw)))
+
+    return radar
+
+def extract_grade_and_titles(text: str) -> tuple:
+    grade = ''
+    titles = []
+    text_content = text or ''
+    m_grade = re.search(r'(?:综合(?:表现)?评级|综合评定|总评级?)\s*[:：]\s*[*_`【\[]*([SABCDFabcdf][+-]?)[*_`】\]]*', text_content)
+    if m_grade:
+        grade = m_grade.group(1).upper()
+    
+    m_titles = re.search(r'(?:专属风味称号(?:/标签)?|风味标签|称号|头衔)\s*[:：]\s*(.+)', text_content)
+    if m_titles:
+        raw_t = m_titles.group(1).split('\n')[0]
+        found = re.findall(r'[“"【「『]([^”"】」』]+)[”"】」』]', raw_t)
+        if found:
+            titles = [t.strip() for t in found if t.strip()]
+        else:
+            parts = re.split(r'[,，、|/]\s*', raw_t)
+            titles = [re.sub(r'[*_`]', '', p).strip() for p in parts if p.strip() and len(p.strip()) < 25]
+    return grade, titles
+
+def extract_identity_from_text(text: str) -> str:
+    m = re.search(r'【身份[:：]\s*(PL|KP|DM|双重|全能|主持|玩家)[^】]*】', text or '', re.IGNORECASE)
+    if m:
+        id_str = m.group(1).upper()
+        if id_str in ('KP', 'DM', '主持'):
+            return 'KP'
+        elif id_str in ('双重', '全能'):
+            return '双重'
+        return 'PL'
+    return 'PL'
+
+def _clean_report_title_main(title: str) -> str:
+    """提取报告标题主体，过滤括号内的角色或昵称"""
+    if not title:
+        return ""
+    t = re.sub(r'\(.*?\)', '', str(title))
+    t = re.sub(r'（.*?）', '', t)
+    t = re.sub(r'\[.*?\]', '', t)
+    t = re.sub(r'【.*?】', '', t)
+    return t.strip()
+
+def resolve_identity_from_title(title: str) -> str:
+    """
+    根据报告标题严格判定身份（以报告标题为绝对权威）：
+    返回 'KP'、'PL'、'双重' 或 ''
+    """
+    t_main = _clean_report_title_main(title)
+    if not t_main:
+        return ''
+    
+    # 检查双重/全能
+    if any(k in t_main for k in ("全能", "双重", "兼有")) or ("主持" in t_main and "玩家" in t_main):
+        return '双重'
+
+    has_kp = any(k in t_main for k in ("主持", "带团", "守秘人", "DM")) or bool(re.search(r'\bKP\b', t_main, re.IGNORECASE))
+    has_pl = any(k in t_main for k in ("玩家", "跑团风格", "调查员", "PC")) or bool(re.search(r'\bPL\b', t_main, re.IGNORECASE))
+
+    if has_kp and not has_pl:
+        return 'KP'
+    if has_pl and not has_kp:
+        return 'PL'
+    if has_kp and has_pl:
+        if any(k in t_main for k in ("主持", "带团", "守秘人")):
+            return 'KP'
+        return 'PL'
+    return ''
+
+def _is_kp_report_title(title: str) -> bool:
+    """兼容旧函数名：精准判断报告标题是否为 KP 主持风格报告"""
+    return resolve_identity_from_title(title) == 'KP'
+
+def resolve_record_identity(title="", original_tag="", full_report="", specified_identity="", stats=None, raw_identity="", role="") -> str:
+    """
+    报告真实身份权威裁决层级：
+    1. report_title 权威最高！
+       - 若标题包含 "玩家" / "跑团风格" -> 100% 裁决为 PL（任何 stats.is_kp 均不可推翻！）
+       - 若标题包含 "主持" / "带团" / "守秘人" -> 100% 裁决为 KP
+       - 若标题包含 "全能" / "双重" -> 双重
+    2. original_identity_tag 权威第二
+    3. full_report 正文中的研判文本（如“身份确凿为纯粹的【PL（玩家）】”或“纯粹的KP”）
+    4. 显式指定的 specified_identity
+    5. 记录原有 identity / role (仅在标题完全无法识别时兜底)
+    6. stats.is_kp (仅作为最后的启发式兜底)
+    """
+    # 1. 标题最高优先
+    tid = resolve_identity_from_title(title)
+    if tid in ('KP', 'PL', '双重'):
+        return tid
+
+    # 2. original_identity_tag
+    orig = str(original_tag or '').strip().upper()
+    if orig in ('KP', 'DM', '主持'):
+        return 'KP'
+    elif orig in ('PL', '玩家'):
+        return 'PL'
+    elif orig in ('双重', '全能'):
+        return '双重'
+
+    # 3. 正文研判结论
+    if full_report:
+        rep_text = str(full_report)
+        if re.search(r'纯粹的\s*【?\s*(?:PL|玩家)', rep_text, re.IGNORECASE):
+            return 'PL'
+        if re.search(r'纯粹的\s*【?\s*(?:KP|守秘人|主持)', rep_text, re.IGNORECASE):
+            return 'KP'
+        m_tag = re.search(r'【身份[：:]\s*(KP|PL|双重|全能|主持|玩家|DM|守秘人)\s*】', rep_text, re.IGNORECASE)
+        if m_tag:
+            tag_val = m_tag.group(1).upper()
+            if tag_val in ('KP', 'DM', '主持', '守秘人'):
+                return 'KP'
+            elif tag_val in ('PL', '玩家'):
+                return 'PL'
+
+    # 4. 显式指令指定
+    spec = str(specified_identity or '').strip().upper()
+    if spec in ('KP', 'DM', '主持', '主持人', '守秘人', '带团'):
+        return 'KP'
+    elif spec in ('PL', '玩家', 'PLAYER'):
+        return 'PL'
+    elif spec in ('双重', '全能', '兼有'):
+        return '双重'
+
+    # 5. 记录原有 identity / role
+    for rc in (str(raw_identity or ''), str(role or '')):
+        rc_up = rc.strip().upper()
+        if rc_up in ('KP', 'DM', '主持', '主持人', '守秘人', '带团'):
+            return 'KP'
+        elif rc_up in ('PL', '玩家', 'PLAYER'):
+            return 'PL'
+        elif rc_up in ('双重', '全能', '兼有'):
+            return '双重'
+
+    # 6. stats 启发式统计最后兜底
+    if isinstance(stats, dict) and stats.get('is_kp'):
+        return 'KP'
+
+    return 'PL'
+
+
+def _do_migrate_legacy_root_if_needed(target_dir: str):
+    """迁移旧版本根目录下未分区的 growth_timeline.json 及 records/ 文件至 pl/ 和 kp/"""
+    legacy_timeline_path = os.path.join(target_dir, "growth_timeline.json")
+    legacy_records_dir = os.path.join(target_dir, "records")
+    
+    has_legacy_timeline = os.path.isfile(legacy_timeline_path)
+    has_legacy_records = os.path.isdir(legacy_records_dir) and any(os.scandir(legacy_records_dir))
+    
+    if not has_legacy_timeline and not has_legacy_records:
+        return
+
+    legacy_data = {}
+    if has_legacy_timeline:
+        try:
+            with open(legacy_timeline_path, "r", encoding="utf-8-sig") as f:
+                legacy_data = json.load(f)
+        except Exception:
+            legacy_data = {}
+
+    history = legacy_data.get("history", [])
+    handled_rec_ids = set()
+
+    for h in history:
+        rec_id = h.get("record_id")
+        rec_data = None
+        if has_legacy_records and rec_id:
+            rec_json_f = os.path.join(legacy_records_dir, f"{rec_id}.json")
+            if os.path.isfile(rec_json_f):
+                try:
+                    with open(rec_json_f, "r", encoding="utf-8-sig") as rf:
+                        rec_data = json.load(rf)
+                except Exception:
+                    pass
+
+        cand_id = ""
+        for tok in (h.get("identity"), h.get("role"), rec_data and rec_data.get("identity"), rec_data and rec_data.get("role"), legacy_data.get("role")):
+            if tok and str(tok).strip().upper() in ('KP', 'DM', '主持', '主持人', '守秘人', '带团'):
+                cand_id = "KP"
+                break
+        real_id = resolve_record_identity(
+            title=h.get("report_title") or (rec_data and rec_data.get("report_title")),
+            original_tag=(rec_data and rec_data.get("original_identity_tag")),
+            full_report=(rec_data and rec_data.get("full_report")),
+            stats=h.get("stats") or (rec_data and rec_data.get("stats")),
+            raw_identity=cand_id or h.get("identity") or (rec_data and rec_data.get("identity")),
+            role=cand_id or h.get("role") or (rec_data and rec_data.get("role")) or legacy_data.get("role")
+        )
+        ident = "kp" if real_id == 'KP' else "pl"
+        role_dir = os.path.join(target_dir, ident)
+        role_records_dir = os.path.join(role_dir, "records")
+        os.makedirs(role_records_dir, exist_ok=True)
+
+        if has_legacy_records and rec_id:
+            for fname in os.listdir(legacy_records_dir):
+                if fname.startswith(rec_id):
+                    src_f = os.path.join(legacy_records_dir, fname)
+                    dst_f = os.path.join(role_records_dir, fname)
+                    try:
+                        if os.path.exists(dst_f):
+                            os.remove(dst_f)
+                        shutil.move(src_f, dst_f)
+                    except Exception:
+                        pass
+            handled_rec_ids.add(rec_id)
+
+        role_timeline_path = os.path.join(role_dir, "growth_timeline.json")
+        role_data = {
+            "target": legacy_data.get("target", ""),
+            "qq": legacy_data.get("qq", ""),
+            "role": ident.upper(),
+            "first_seen": legacy_data.get("first_seen", ""),
+            "last_updated": legacy_data.get("last_updated", ""),
+            "total_records": 0,
+            "history": []
+        }
+        if os.path.exists(role_timeline_path):
+            try:
+                with open(role_timeline_path, "r", encoding="utf-8-sig") as rf:
+                    role_data = json.load(rf)
+            except Exception:
+                pass
+        
+        h_copy = dict(h)
+        h_copy["identity"] = ident.upper()
+        existing_ids = {item.get("record_id") for item in role_data.get("history", [])}
+        if rec_id not in existing_ids:
+            role_data.setdefault("history", []).append(h_copy)
+            role_data["history"] = ensure_history_sorted_and_timed(role_data["history"])
+            role_data["total_records"] = len(role_data["history"])
+            try:
+                with open(role_timeline_path, "w", encoding="utf-8") as rf:
+                    json.dump(role_data, rf, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+    # 处理 legacy_records 目录中未被 history 索引的孤立记录
+    if has_legacy_records:
+        for fname in os.listdir(legacy_records_dir):
+            if fname.endswith(".json"):
+                orphan_id = fname[:-5]
+                if orphan_id in handled_rec_ids:
+                    continue
+                src_f = os.path.join(legacy_records_dir, fname)
+                try:
+                    with open(src_f, "r", encoding="utf-8-sig") as rf:
+                        o_data = json.load(rf)
+                except Exception:
+                    o_data = {}
+                cand_id = ""
+                for tok in (o_data.get("identity"), o_data.get("role"), legacy_data.get("role")):
+                    if tok and str(tok).strip().upper() in ('KP', 'DM', '主持', '主持人', '守秘人', '带团'):
+                        cand_id = "KP"
+                        break
+                real_id = resolve_record_identity(
+                    title=o_data.get("report_title"),
+                    original_tag=o_data.get("original_identity_tag"),
+                    full_report=o_data.get("full_report"),
+                    stats=o_data.get("stats"),
+                    raw_identity=cand_id or o_data.get("identity"),
+                    role=cand_id or o_data.get("role") or legacy_data.get("role")
+                )
+                ident = "kp" if real_id == 'KP' else "pl"
+                role_dir = os.path.join(target_dir, ident, "records")
+                os.makedirs(role_dir, exist_ok=True)
+                for f_rel in os.listdir(legacy_records_dir):
+                    if f_rel.startswith(orphan_id):
+                        try:
+                            dst_f = os.path.join(role_dir, f_rel)
+                            if os.path.exists(dst_f):
+                                os.remove(dst_f)
+                            shutil.move(os.path.join(legacy_records_dir, f_rel), dst_f)
+                        except Exception:
+                            pass
+
+    # 备份旧 timeline
+    if has_legacy_timeline:
+        try:
+            backup_path = os.path.join(target_dir, "growth_timeline.json.migrated_bak")
+            if not os.path.exists(backup_path):
+                shutil.move(legacy_timeline_path, backup_path)
+            else:
+                os.remove(legacy_timeline_path)
+        except Exception:
+            pass
+
+def heal_player_archive_partitions(target_dir: str):
+    """
+    双向自愈纠偏引擎（以报告标题 report_title 为绝对权威判定）：
+    1. 检查 pl/ 目录中的 timeline 与 records：若标题/内容确凿为 KP 主持记录，自动搬移至 kp/
+    2. 检查 kp/ 目录中的 timeline 与 records：若标题/内容确凿为 PL 玩家记录（如因旧统计错误误分），自动纠偏迁回 pl/
+    3. 同步校正搬移后的 records/*.json 内部属性 (identity, role)
+    4. 自动扫描并迁移 pl/records 与 kp/records 中的孤儿文件
+    5. 原子化重组并写入 pl/growth_timeline.json 与 kp/growth_timeline.json
+    """
+    if not target_dir or not os.path.isdir(target_dir):
+        return
+
+    pl_dir = os.path.join(target_dir, "pl")
+    kp_dir = os.path.join(target_dir, "kp")
+    pl_records_dir = os.path.join(pl_dir, "records")
+    kp_records_dir = os.path.join(kp_dir, "records")
+    pl_timeline_path = os.path.join(pl_dir, "growth_timeline.json")
+    kp_timeline_path = os.path.join(kp_dir, "growth_timeline.json")
+
+    pl_data = None
+    if os.path.isfile(pl_timeline_path):
+        try:
+            with open(pl_timeline_path, "r", encoding="utf-8-sig") as f:
+                pl_data = json.load(f)
+        except Exception:
+            pl_data = None
+
+    kp_data = None
+    if os.path.isfile(kp_timeline_path):
+        try:
+            with open(kp_timeline_path, "r", encoding="utf-8-sig") as f:
+                kp_data = json.load(f)
+        except Exception:
+            kp_data = None
+
+    had_pl = bool(pl_data) or (os.path.isdir(pl_records_dir) and any(os.scandir(pl_records_dir)))
+    had_kp = bool(kp_data) or (os.path.isdir(kp_records_dir) and any(os.scandir(kp_records_dir)))
+    if not had_pl and not had_kp:
+        return
+
+    target_name = (pl_data and pl_data.get("target")) or (kp_data and kp_data.get("target")) or os.path.basename(target_dir)
+    target_qq = (pl_data and pl_data.get("qq")) or (kp_data and kp_data.get("qq")) or (os.path.basename(target_dir) if re.match(r'^\d{5,12}$', os.path.basename(target_dir)) else "")
+
+    if not pl_data:
+        pl_data = {"target": target_name, "qq": target_qq, "role": "PL", "total_records": 0, "history": []}
+    if not kp_data:
+        kp_data = {"target": target_name, "qq": target_qq, "role": "KP", "total_records": 0, "history": []}
+
+    pl_history = pl_data.get("history", [])
+    kp_history = kp_data.get("history", [])
+
+    new_pl_history = []
+    new_kp_history = []
+    handled_pl_ids = set()
+    handled_kp_ids = set()
+
+    # 1. 扫描 pl 侧：将实际为 KP 的挑出，移至 kp
+    for h in pl_history:
+        rec_id = h.get("record_id")
+        rec_json_path = os.path.join(pl_records_dir, f"{rec_id}.json") if rec_id and os.path.isdir(pl_records_dir) else None
+        rec_data = None
+        if rec_json_path and os.path.isfile(rec_json_path):
+            try:
+                with open(rec_json_path, "r", encoding="utf-8-sig") as rf:
+                    rec_data = json.load(rf)
+            except Exception:
+                pass
+
+        cand_id = ""
+        for tok in (h.get("identity"), h.get("role"), rec_data and rec_data.get("identity"), rec_data and rec_data.get("role"), pl_data and pl_data.get("role")):
+            if tok and str(tok).strip().upper() in ('KP', 'DM', '主持', '主持人', '守秘人', '带团'):
+                cand_id = "KP"
+                break
+
+        real_id = resolve_record_identity(
+            title=h.get("report_title") or (rec_data and rec_data.get("report_title")),
+            original_tag=(rec_data and rec_data.get("original_identity_tag")),
+            full_report=(rec_data and rec_data.get("full_report")),
+            stats=(rec_data and rec_data.get("stats")),
+            raw_identity=cand_id or h.get("identity") or (rec_data and rec_data.get("identity")),
+            role=cand_id or h.get("role") or (rec_data and rec_data.get("role"))
+        )
+
+        if real_id == 'KP':
+            os.makedirs(kp_records_dir, exist_ok=True)
+            if rec_id and os.path.isdir(pl_records_dir):
+                for fname in os.listdir(pl_records_dir):
+                    if fname.startswith(rec_id):
+                        src_f = os.path.join(pl_records_dir, fname)
+                        dst_f = os.path.join(kp_records_dir, fname)
+                        try:
+                            if os.path.exists(dst_f): os.remove(dst_f)
+                            shutil.move(src_f, dst_f)
+                        except Exception: pass
+            kp_rec_json = os.path.join(kp_records_dir, f"{rec_id}.json")
+            if os.path.isfile(kp_rec_json):
+                try:
+                    with open(kp_rec_json, "r", encoding="utf-8-sig") as rf:
+                        up_rec = json.load(rf)
+                    up_rec["identity"] = "KP"
+                    up_rec["role"] = "KP"
+                    with open(kp_rec_json, "w", encoding="utf-8") as wf:
+                        json.dump(up_rec, wf, ensure_ascii=False, indent=2)
+                except Exception: pass
+            h_copy = dict(h)
+            h_copy["identity"] = "KP"
+            new_kp_history.append(h_copy)
+            if rec_id: handled_kp_ids.add(rec_id)
+        else:
+            h_copy = dict(h)
+            h_copy["identity"] = "PL"
+            new_pl_history.append(h_copy)
+            if rec_id: handled_pl_ids.add(rec_id)
+
+    # 2. 扫描 kp 侧：将实际为 PL 的挑出，移至 pl (彻底修复 PL 报告被误分到 KP 的问题)
+    for h in kp_history:
+        rec_id = h.get("record_id")
+        rec_json_path = os.path.join(kp_records_dir, f"{rec_id}.json") if rec_id and os.path.isdir(kp_records_dir) else None
+        rec_data = None
+        if rec_json_path and os.path.isfile(rec_json_path):
+            try:
+                with open(rec_json_path, "r", encoding="utf-8-sig") as rf:
+                    rec_data = json.load(rf)
+            except Exception:
+                pass
+
+        cand_id = ""
+        for tok in (h.get("identity"), h.get("role"), rec_data and rec_data.get("identity"), rec_data and rec_data.get("role"), kp_data and kp_data.get("role")):
+            if tok and str(tok).strip().upper() in ('PL', '玩家', 'PLAYER'):
+                cand_id = "PL"
+                break
+
+        real_id = resolve_record_identity(
+            title=h.get("report_title") or (rec_data and rec_data.get("report_title")),
+            original_tag=(rec_data and rec_data.get("original_identity_tag")),
+            full_report=(rec_data and rec_data.get("full_report")),
+            stats=(rec_data and rec_data.get("stats")),
+            raw_identity=cand_id or h.get("identity") or (rec_data and rec_data.get("identity")),
+            role=cand_id or h.get("role") or (rec_data and rec_data.get("role"))
+        )
+
+        if real_id == 'PL':
+            os.makedirs(pl_records_dir, exist_ok=True)
+            if rec_id and os.path.isdir(kp_records_dir):
+                for fname in os.listdir(kp_records_dir):
+                    if fname.startswith(rec_id):
+                        src_f = os.path.join(kp_records_dir, fname)
+                        dst_f = os.path.join(pl_records_dir, fname)
+                        try:
+                            if os.path.exists(dst_f): os.remove(dst_f)
+                            shutil.move(src_f, dst_f)
+                        except Exception: pass
+            pl_rec_json = os.path.join(pl_records_dir, f"{rec_id}.json")
+            if os.path.isfile(pl_rec_json):
+                try:
+                    with open(pl_rec_json, "r", encoding="utf-8-sig") as rf:
+                        up_rec = json.load(rf)
+                    up_rec["identity"] = "PL"
+                    up_rec["role"] = "PL"
+                    with open(pl_rec_json, "w", encoding="utf-8") as wf:
+                        json.dump(up_rec, wf, ensure_ascii=False, indent=2)
+                except Exception: pass
+            h_copy = dict(h)
+            h_copy["identity"] = "PL"
+            new_pl_history.append(h_copy)
+            if rec_id: handled_pl_ids.add(rec_id)
+        else:
+            h_copy = dict(h)
+            h_copy["identity"] = "KP"
+            new_kp_history.append(h_copy)
+            if rec_id: handled_kp_ids.add(rec_id)
+
+    # 3. 扫描 pl/records 中的孤儿文件
+    if os.path.isdir(pl_records_dir):
+        for fname in os.listdir(pl_records_dir):
+            if fname.endswith(".json"):
+                orphan_rec_id = fname[:-5]
+                if orphan_rec_id in handled_pl_ids:
+                    continue
+                rec_json_path = os.path.join(pl_records_dir, fname)
+                try:
+                    with open(rec_json_path, "r", encoding="utf-8-sig") as rf:
+                        rec_data = json.load(rf)
+                except Exception:
+                    rec_data = {}
+                cand_id = ""
+                for tok in (rec_data.get("identity"), rec_data.get("role"), pl_data and pl_data.get("role")):
+                    if tok and str(tok).strip().upper() in ('KP', 'DM', '主持', '主持人', '守秘人', '带团'):
+                        cand_id = "KP"
+                        break
+                real_id = resolve_record_identity(
+                    title=rec_data.get("report_title"),
+                    original_tag=rec_data.get("original_identity_tag"),
+                    full_report=rec_data.get("full_report"),
+                    stats=rec_data.get("stats"),
+                    raw_identity=cand_id or rec_data.get("identity"),
+                    role=cand_id or rec_data.get("role")
+                )
+                if real_id == 'KP':
+                    os.makedirs(kp_records_dir, exist_ok=True)
+                    for f_rel in os.listdir(pl_records_dir):
+                        if f_rel.startswith(orphan_rec_id):
+                            try:
+                                dst_f = os.path.join(kp_records_dir, f_rel)
+                                if os.path.exists(dst_f): os.remove(dst_f)
+                                shutil.move(os.path.join(pl_records_dir, f_rel), dst_f)
+                            except Exception: pass
+                    new_kp_history.append({
+                        "record_id": orphan_rec_id,
+                        "report_title": rec_data.get("report_title") or "主持带团战役",
+                        "identity": "KP",
+                        "created_at": rec_data.get("created_at") or time.strftime("%Y-%m-%d %H:%M:%S")
+                    })
+                else:
+                    new_pl_history.append({
+                        "record_id": orphan_rec_id,
+                        "report_title": rec_data.get("report_title") or "跑团战役",
+                        "identity": "PL",
+                        "created_at": rec_data.get("created_at") or time.strftime("%Y-%m-%d %H:%M:%S")
+                    })
+
+    # 4. 扫描 kp/records 中的孤儿文件
+    if os.path.isdir(kp_records_dir):
+        for fname in os.listdir(kp_records_dir):
+            if fname.endswith(".json"):
+                orphan_rec_id = fname[:-5]
+                if orphan_rec_id in handled_kp_ids:
+                    continue
+                rec_json_path = os.path.join(kp_records_dir, fname)
+                try:
+                    with open(rec_json_path, "r", encoding="utf-8-sig") as rf:
+                        rec_data = json.load(rf)
+                except Exception:
+                    rec_data = {}
+                cand_id = ""
+                for tok in (rec_data.get("identity"), rec_data.get("role"), kp_data and kp_data.get("role")):
+                    if tok and str(tok).strip().upper() in ('PL', '玩家', 'PLAYER'):
+                        cand_id = "PL"
+                        break
+                real_id = resolve_record_identity(
+                    title=rec_data.get("report_title"),
+                    original_tag=rec_data.get("original_identity_tag"),
+                    full_report=rec_data.get("full_report"),
+                    stats=rec_data.get("stats"),
+                    raw_identity=cand_id or rec_data.get("identity"),
+                    role=cand_id or rec_data.get("role")
+                )
+                if real_id == 'PL':
+                    os.makedirs(pl_records_dir, exist_ok=True)
+                    for f_rel in os.listdir(kp_records_dir):
+                        if f_rel.startswith(orphan_rec_id):
+                            try:
+                                dst_f = os.path.join(pl_records_dir, f_rel)
+                                if os.path.exists(dst_f): os.remove(dst_f)
+                                shutil.move(os.path.join(kp_records_dir, f_rel), dst_f)
+                            except Exception: pass
+                    new_pl_history.append({
+                        "record_id": orphan_rec_id,
+                        "report_title": rec_data.get("report_title") or "跑团战役",
+                        "identity": "PL",
+                        "created_at": rec_data.get("created_at") or time.strftime("%Y-%m-%d %H:%M:%S")
+                    })
+                else:
+                    new_kp_history.append({
+                        "record_id": orphan_rec_id,
+                        "report_title": rec_data.get("report_title") or "主持带团战役",
+                        "identity": "KP",
+                        "created_at": rec_data.get("created_at") or time.strftime("%Y-%m-%d %H:%M:%S")
+                    })
+
+    def _dedup_history(hist):
+        seen = set()
+        res = []
+        for item in hist:
+            rid = item.get("record_id")
+            if rid and rid in seen:
+                continue
+            seen.add(rid)
+            res.append(item)
+        return res
+
+    final_pl = _dedup_history(new_pl_history)
+    final_kp = _dedup_history(new_kp_history)
+
+    os.makedirs(pl_dir, exist_ok=True)
+    os.makedirs(kp_dir, exist_ok=True)
+
+    if final_pl or had_pl:
+        os.makedirs(pl_dir, exist_ok=True)
+        pl_data["history"] = ensure_history_sorted_and_timed(final_pl)
+        pl_data["total_records"] = len(pl_data["history"])
+        pl_data["role"] = "PL"
+        try:
+            with open(pl_timeline_path, "w", encoding="utf-8") as f:
+                json.dump(pl_data, f, ensure_ascii=False, indent=2)
+        except Exception: pass
+
+    if final_kp or had_kp:
+        os.makedirs(kp_dir, exist_ok=True)
+        kp_data["history"] = ensure_history_sorted_and_timed(final_kp)
+        kp_data["total_records"] = len(kp_data["history"])
+        kp_data["role"] = "KP"
+        try:
+            with open(kp_timeline_path, "w", encoding="utf-8") as f:
+                json.dump(kp_data, f, ensure_ascii=False, indent=2)
+        except Exception: pass
+
+# 兼容别名
+_heal_misclassified_pl_records_if_needed = heal_player_archive_partitions
+
+def _migrate_legacy_archive_if_needed(target_dir: str):
+    """
+    统一迁移与双向自愈引擎：
+    1. 迁移旧版本未隔离的根目录档案 (target_dir/growth_timeline.json 及 target_dir/records) -> pl/ 和 kp/
+    2. 无条件执行双向自愈纠偏 (PL 误入 KP 迁回 PL，KP 误入 PL 迁至 KP，以报告标题为绝对第一优先)
+    """
+    if not target_dir or not os.path.isdir(target_dir):
+        return
+
+    try:
+        _do_migrate_legacy_root_if_needed(target_dir)
+    except Exception as e:
+        print(f"[风格档案] 根目录旧档案迁移异常 {target_dir}: {e}")
+
+    try:
+        heal_player_archive_partitions(target_dir)
+    except Exception as e:
+        print(f"[风格档案] 双向自愈迁移异常 {target_dir}: {e}")
+
+def heal_all_player_archives():
+    """扫描全局 STYLE_ARCHIVES_DIR 目录下所有用户档案，执行旧版迁移与双向自动自愈纠偏"""
+    try:
+        if not os.path.isdir(STYLE_ARCHIVES_DIR):
+            return
+        base_dir = os.path.realpath(STYLE_ARCHIVES_DIR)
+        for entry in os.listdir(base_dir):
+            tdir = os.path.join(base_dir, entry)
+            if os.path.isdir(tdir):
+                _migrate_legacy_archive_if_needed(tdir)
+    except Exception as e:
+        print(f"[风格档案] 全局自愈扫描异常: {e}")
+
+def save_player_style_archive(target_user, result_text, images_list, sources, job_id, user_key="", stats=None, timeline_str="", report_title="", start_t=0, end_t=0, specified_identity=None):
+    """将玩家/主持的风格分析结果归档至专属成长文件夹中，PL 与 KP 彻底物理隔离"""
+    dir_name, target_name, qq_num = _extract_target_dir_name(target_user, user_key)
+    base_dir = os.path.realpath(STYLE_ARCHIVES_DIR)
+    target_dir = os.path.realpath(os.path.join(base_dir, dir_name))
+    try:
+        if os.path.commonpath([base_dir, target_dir]) != base_dir:
+            print(f"[风格档案] 警告：非法路径 {dir_name}，拒绝保存")
+            return None
+    except ValueError:
+        return None
+
+    # 检查并自动平滑迁移旧档案及双向自愈纠偏
+    _migrate_legacy_archive_if_needed(target_dir)
+
+    # 若目标含有纯数字 QQ 且有具体的角色别名，自动检测并合并历史独立角色目录
+    if qq_num and target_name and target_name != qq_num and not target_name.startswith("用户_"):
+        _merge_alias_dir_into_qq(base_dir, qq_num, target_name)
+
+    # 身份判定：以报告标题为绝对权威判定层级（标题第一优先，不受 stats.is_kp 错误干扰）
+    identity = resolve_record_identity(
+        title=report_title,
+        specified_identity=specified_identity,
+        full_report=result_text,
+        stats=stats
+    )
+
+    # 彻底隔离：KP 存入 kp/，PL 存入 pl/
+    if identity == 'KP' or (identity == '双重' and stats and stats.get('is_kp')):
+        role_subdir = "kp"
+        role_label = "KP"
+    else:
+        role_subdir = "pl"
+        role_label = "PL"
+
+    role_dir = os.path.join(target_dir, role_subdir)
+    records_dir = os.path.join(role_dir, "records")
+    os.makedirs(records_dir, exist_ok=True)
+
+    now = datetime.datetime.now()
+    timestamp_str = now.strftime("%Y%m%d_%H%M%S")
+    record_id = f"{timestamp_str}_{job_id[:8]}"
+
+    radar = extract_radar_data_from_text(result_text)
+    grade, titles = extract_grade_and_titles(result_text)
+
+    # 若未提供秒级时间戳，自动从 timeline_str 解析补齐
+    if not start_t or not end_t:
+        s_calc, e_calc = _detect_log_time_range(None, timeline_str)
+        if s_calc: start_t = start_t or s_calc
+        if e_calc: end_t = end_t or e_calc
+
+    saved_images = []
+    if images_list:
+        for p_idx, img_bytes in enumerate(images_list, 1):
+            img_name = f"{record_id}_p{p_idx}.png"
+            img_path = os.path.join(records_dir, img_name)
+            try:
+                with open(img_path, "wb") as f_img:
+                    f_img.write(img_bytes)
+                saved_images.append(img_name)
+            except Exception as e:
+                print(f"[风格档案] 保存图片失败 {img_name}: {e}")
+
+    record_data = {
+        "job_id": job_id,
+        "record_id": record_id,
+        "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "target": target_name,
+        "qq": qq_num,
+        "identity": role_label,
+        "original_identity_tag": identity,
+        "grade": grade,
+        "titles": titles,
+        "radar": radar,
+        "log_timeline": timeline_str,
+        "start_t": start_t,
+        "end_t": end_t,
+        "sources": sources,
+        "stats": stats or {},
+        "report_title": report_title,
+        "full_report": result_text,
+        "images": saved_images
+    }
+    with open(os.path.join(records_dir, f"{record_id}.json"), "w", encoding="utf-8") as f:
+        json.dump(record_data, f, ensure_ascii=False, indent=2)
+
+    timeline_json_path = os.path.join(role_dir, "growth_timeline.json")
+    timeline_data = {
+        "target": target_name,
+        "qq": qq_num,
+        "role": role_label,
+        "first_seen": now.strftime("%Y-%m-%d"),
+        "last_updated": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "total_records": 0,
+        "history": []
+    }
+    if os.path.exists(timeline_json_path):
+        try:
+            with open(timeline_json_path, "r", encoding="utf-8-sig") as f:
+                timeline_data = json.load(f)
+        except Exception:
+            pass
+
+    if target_name and target_name != qq_num:
+        timeline_data["target"] = target_name
+    if qq_num:
+        timeline_data["qq"] = qq_num
+    timeline_data["role"] = role_label
+    timeline_data["last_updated"] = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    aliases_list = timeline_data.setdefault("aliases", [])
+    if target_name and target_name != qq_num and not target_name.startswith("用户_") and target_name not in aliases_list:
+        aliases_list.append(target_name)
+    if stats and isinstance(stats, dict):
+        for a in stats.get("aliases", []):
+            if a and a not in aliases_list and not re.match(r'^\d+$', str(a)) and not str(a).startswith("用户("):
+                aliases_list.append(a)
+
+    m_dt = re.search(r'\b(20\d{2}[-/]\d{1,2}[-/]\d{1,2})\b', timeline_str or '')
+    if m_dt:
+        t_cand = m_dt.group(1).replace('/', '-')
+        if not timeline_data.get("first_seen") or t_cand < timeline_data["first_seen"]:
+            timeline_data["first_seen"] = t_cand
+
+    history_entry = {
+        "record_id": record_id,
+        "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "target": target_name,
+        "aliases": list(aliases_list),
+        "log_timeline": timeline_str,
+        "start_t": start_t,
+        "end_t": end_t,
+        "sources": sources,
+        "identity": role_label,
+        "grade": grade,
+        "titles": titles,
+        "radar": radar,
+        "stats": {
+            "char_count": (stats.get("char_count") or stats.get("total_chars") or stats.get("rp_chars") or 0) if isinstance(stats, dict) else 0,
+            "msg_count": (stats.get("msg_count") or stats.get("message_count") or 0) if isinstance(stats, dict) else 0,
+            "total_chars": (stats.get("total_chars") or stats.get("char_count") or 0) if isinstance(stats, dict) else 0,
+            "message_count": (stats.get("message_count") or stats.get("msg_count") or 0) if isinstance(stats, dict) else 0,
+        } if stats else {}
+    }
+    timeline_data.setdefault("history", []).append(history_entry)
+    timeline_data["history"].sort(key=lambda h: (
+        0 if h.get("start_t") else 1,
+        h.get("start_t") or 0,
+        h.get("end_t") or 0,
+        _parse_time_str(h.get("created_at", "")) or 0
+    ))
+    timeline_data["total_records"] = len(timeline_data["history"])
+
+    with open(timeline_json_path, "w", encoding="utf-8") as f:
+        json.dump(timeline_data, f, ensure_ascii=False, indent=2)
+
+    return role_dir
+
+def format_adjacent_history_for_prompt(prev_records: list, next_records: list, target_name: str) -> str:
+    """将检索出的前 2 次战役与后 1 次战役格式化为供 LLM 参考的成长基准提示"""
+    if not prev_records and not next_records:
+        return ""
+
+    lines = [
+        "\n\n" + "=" * 50,
+        f"【该玩家（{target_name}）的历史战役成长档案参考（供对比风格演化）】",
+        "系统已自动检索到该对象在档案库中紧邻当前分析时间轴的历次战役表现记录：",
+    ]
+
+    if prev_records:
+        lines.append("▶ 【当前战役之前的历次战役基准（早于本次）】：")
+        total_p = len(prev_records)
+        for idx, rec in enumerate(prev_records, 1):
+            lbl = f"前第 {total_p - idx + 1} 次战役" if total_p > 1 else "前次战役"
+            tl = rec.get("log_timeline") or "未知时间"
+            ident = rec.get("identity") or "PL"
+            grade = rec.get("grade") or "未评级"
+            titles = "、".join(rec.get("titles", [])) or "无特殊称号"
+            radar_dict = rec.get("radar", {})
+            radar_str = " | ".join([f"{k}:{v}" for k, v in radar_dict.items()]) if radar_dict else "无雷达数据"
+            lines.append(f"  ● [{lbl}] 时间跨度: {tl} | 身份: {ident} | 综合评级: {grade} | 风味称号: {titles}")
+            if radar_str != "无雷达数据":
+                lines.append(f"    能力雷达: {radar_str}")
+
+    if next_records:
+        lines.append("▶ 【当前战役之后的后序战役延展（晚于本次）】：")
+        for rec in next_records:
+            tl = rec.get("log_timeline") or "未知时间"
+            ident = rec.get("identity") or "PL"
+            grade = rec.get("grade") or "未评级"
+            titles = "、".join(rec.get("titles", [])) or "无特殊称号"
+            radar_dict = rec.get("radar", {})
+            radar_str = " | ".join([f"{k}:{v}" for k, v in radar_dict.items()]) if radar_dict else "无雷达数据"
+            lines.append(f"  ● [后序战役] 时间跨度: {tl} | 身份: {ident} | 综合评级: {grade} | 风味称号: {titles}")
+            if radar_str != "无雷达数据":
+                lines.append(f"    能力雷达: {radar_str}")
+
+    lines.extend([
+        "\n【时序对比与成长点评指引】：",
+        "请大模型在分析本次跑团表现时，紧密结合上述历史战役的发挥基准进行纵向对比：",
+        "1. 对比该玩家在本次战役中的六维能力表现（是否有突破、状态起伏或思维维度的转变）；",
+        "2. 在最终报告的【成长演变/蜕变点评】或【综合评价】章节中，点出其相较于过往经历的成长亮点或一贯风格传承，展现玩家长期的成长轨迹。",
+        "=" * 50 + "\n"
+    ])
+    return "\n".join(lines)
+
+def get_adjacent_historical_records(target_user: str, curr_start_t: int, curr_end_t: int, identity: str = "PL", user_key: str = "") -> tuple:
+    """
+    根据当前 Log 的时间区间，检索该玩家在档案库中：
+    - 发生于本次之前最近的 2 次历史战役 (前次战役)
+    - 发生于本次之后最近的 1 次历史战役 (后序战役)
+    返回 (prev_records, next_records, formatted_prompt_text)
+    """
+    dir_name, target_name, qq_num = _extract_target_dir_name(target_user, user_key)
+    base_dir = os.path.realpath(STYLE_ARCHIVES_DIR)
+    target_dir = os.path.realpath(os.path.join(base_dir, dir_name))
+    
+    if not os.path.isdir(target_dir):
+        matched_dir = None
+        clean_q = qq_num or _sanitize_filename(target_name)
+        if os.path.isdir(base_dir):
+            for entry in os.listdir(base_dir):
+                edir = os.path.join(base_dir, entry)
+                if not os.path.isdir(edir):
+                    continue
+                for sub in ("pl", "kp"):
+                    tf = os.path.join(edir, sub, "growth_timeline.json")
+                    if os.path.exists(tf):
+                        try:
+                            with open(tf, "r", encoding="utf-8") as f:
+                                d = json.load(f)
+                            if d.get("qq") == clean_q or d.get("target") == clean_q or entry == clean_q:
+                                matched_dir = edir
+                                break
+                        except Exception:
+                            pass
+                if matched_dir:
+                    break
+        if matched_dir:
+            target_dir = matched_dir
+        else:
+            return [], [], ""
+
+    _migrate_legacy_archive_if_needed(target_dir)
+
+    role_subdir = "kp" if str(identity).upper() in ("KP", "DM", "主持") else "pl"
+    timeline_path = os.path.join(target_dir, role_subdir, "growth_timeline.json")
+    if not os.path.exists(timeline_path):
+        return [], [], ""
+
+    try:
+        with open(timeline_path, "r", encoding="utf-8") as f:
+            timeline_data = json.load(f)
+    except Exception:
+        return [], [], ""
+
+    history = timeline_data.get("history", [])
+    if not history:
+        return [], [], ""
+
+    for h in history:
+        if not h.get("start_t") or not h.get("end_t"):
+            tl = h.get("log_timeline", "")
+            s_t, e_t = _detect_log_time_range(None, tl)
+            if not s_t:
+                s_t = _parse_time_str(h.get("created_at", "")) or 0
+            if not e_t:
+                e_t = s_t
+            h["start_t"] = s_t
+            h["end_t"] = e_t
+
+    prev_candidates = []
+    next_candidates = []
+
+    if curr_start_t > 0:
+        for h in history:
+            h_start = h.get("start_t") or 0
+            h_end = h.get("end_t") or 0
+            # 排除与本次完全重合的记录
+            if curr_end_t > 0 and h_start == curr_start_t and h_end == curr_end_t:
+                continue
+            
+            # 前置战役：早于当前开始时间
+            if h_end <= curr_start_t or (h_start < curr_start_t and h_end <= curr_end_t):
+                prev_candidates.append(h)
+            # 后续战役：晚于当前结束时间
+            elif curr_end_t > 0 and (h_start >= curr_end_t or h_start > curr_start_t):
+                next_candidates.append(h)
+
+        # 距离当前最近的前 2 次战役
+        prev_candidates.sort(key=lambda x: (x.get("end_t") or 0, x.get("start_t") or 0), reverse=True)
+        prev_records = prev_candidates[:2]
+        prev_records.sort(key=lambda x: (x.get("start_t") or 0, x.get("end_t") or 0))
+
+        # 紧随其后的后 1 次战役
+        next_candidates.sort(key=lambda x: (x.get("start_t") or 0, x.get("end_t") or 0))
+        next_records = next_candidates[:1]
+    else:
+        prev_records = history[-2:] if len(history) >= 2 else history[:]
+        next_records = []
+
+    prompt_text = format_adjacent_history_for_prompt(prev_records, next_records, target_name)
+    return prev_records, next_records, prompt_text
+
+def _format_track_content_lines(data: dict) -> str:
+    if not isinstance(data, dict):
+        return ""
+    hist = [h for h in data.get("history", []) if isinstance(h, dict)]
+    grades = [str(h.get("grade")) for h in hist if h.get("grade")]
+    
+    # 提取按时序排列的称号
+    chronological_titles = []
+    for h in hist:
+        tl = h.get("log_timeline") or (h.get("created_at") or "").split(" ")[0] or "未知时期"
+        raw_titles = h.get("titles") or []
+        ts = raw_titles if isinstance(raw_titles, list) else [raw_titles]
+        for t in ts:
+            t_s = str(t).strip()
+            if t_s:
+                chronological_titles.append((tl, t_s))
+
+    aliases = [str(a) for a in data.get("aliases", []) if a and not str(a).startswith("用户_")]
+    for h in hist:
+        h_t = h.get("target")
+        if h_t and not str(h_t).startswith("用户_") and str(h_t) not in aliases:
+            aliases.append(str(h_t))
+
+    last = hist[-1] if hist else {}
+    last_radar = (last.get("radar") or {}) if isinstance(last, dict) else {}
+    radar_str_parts = []
+    if isinstance(last_radar, dict):
+        for k, v in last_radar.items():
+            if v is not None:
+                radar_str_parts.append(f"{k}: {v}")
+
+    lines = [
+        f"📅 时间跨度: {data.get('first_seen', '未知')} ~ {str(data.get('last_updated', '未知')).split(' ')[0]}",
+    ]
+    if aliases:
+        lines.append(f"🎭 关联角色: {'、'.join(aliases[:5])}")
+    if grades:
+        lines.append(f"🏆 历次评级走势: {' -> '.join(grades[-6:])}")
+    if chronological_titles:
+        t_seq = [f"[{tl}] {t}" for tl, t in chronological_titles]
+        lines.append(f"📜 荣誉称号编年: {' -> '.join(t_seq)}")
+    if radar_str_parts:
+        lines.append("📈 最新能力雷达: " + " | ".join(radar_str_parts))
+    if isinstance(last, dict) and last.get("log_timeline"):
+        lines.append(f"🕰️ 最近战役跨度: {last.get('log_timeline')}")
+    return "\n".join(lines)
+
+def _load_library_archive_fonts():
+    font_main = "C:/Windows/Fonts/msyh.ttc"
+    font_bold = "C:/Windows/Fonts/msyhbd.ttc"
+    font_serif = "C:/Windows/Fonts/simkai.ttf"
+    if not os.path.exists(font_serif):
+        font_serif = font_bold
+    try:
+        return {
+            'title': ImageFont.truetype(font_serif, 30),
+            'subtitle': ImageFont.truetype(font_main, 15),
+            'stamp': ImageFont.truetype(font_serif, 17),
+            'stamp_bold': ImageFont.truetype(font_bold, 18),
+            'h2': ImageFont.truetype(font_bold, 21),
+            'h3': ImageFont.truetype(font_bold, 18),
+            'body': ImageFont.truetype(font_main, 17),
+            'body_bold': ImageFont.truetype(font_bold, 17),
+            'small': ImageFont.truetype(font_main, 15),
+            'small_bold': ImageFont.truetype(font_bold, 15),
+        }
+    except Exception:
+        df = ImageFont.load_default()
+        return {k: df for k in ['title', 'subtitle', 'stamp', 'stamp_bold', 'h2', 'h3', 'body', 'body_bold', 'small', 'small_bold']}
+
+def format_archive_sources_display(sources, max_len: int = 30, show_count: bool = True) -> tuple:
+    """
+    智能格式化战役来源展示名，支持单篇、多Log复合、多文件联合与混合模式。
+    返回: (格式化后的战役显示字符串, 来源篇数)
+    """
+    if not sources:
+        return "跑团战役", 1
+
+    items = []
+    if isinstance(sources, str):
+        s_raw = sources.strip()
+        if " + " in s_raw:
+            items = [x.strip() for x in s_raw.split(" + ") if x.strip()]
+        elif "+" in s_raw and not s_raw.startswith("+"):
+            items = [x.strip() for x in s_raw.split("+") if x.strip()]
+        else:
+            items = [s_raw]
+    elif isinstance(sources, list):
+        for s in sources:
+            if isinstance(s, dict):
+                name = str(s.get("key") or s.get("filename") or s.get("title") or "").strip()
+            else:
+                name = str(s or "").strip()
+            if name:
+                if " + " in name:
+                    items.extend([x.strip() for x in name.split(" + ") if x.strip()])
+                else:
+                    items.append(name)
+    elif isinstance(sources, dict):
+        name = str(sources.get("key") or sources.get("filename") or sources.get("title") or "跑团战役").strip()
+        items = [name]
+    else:
+        items = [str(sources).strip()]
+
+    # 清洗条目名：如果是本地文件路径提取 basename；如果包含 .txt 则精简掉后缀以留出更多有效排版宽度
+    cleaned_items = []
+    seen = set()
+    for it in items:
+        if not it:
+            continue
+        bname = os.path.basename(it)
+        if bname.lower().endswith(".txt"):
+            bname = bname[:-4]
+        if bname and bname not in seen:
+            seen.add(bname)
+            cleaned_items.append(bname)
+
+    if not cleaned_items:
+        return "跑团战役", 1
+
+    total_count = len(cleaned_items)
+    if total_count == 1:
+        return cleaned_items[0], 1
+
+    # 多源复合拼接
+    full_str = " + ".join(cleaned_items)
+    count_suffix = f" (共{total_count}篇)" if show_count else ""
+    if len(full_str) + len(count_suffix) <= max_len:
+        return f"{full_str}{count_suffix}", total_count
+
+    # 若超出限宽，取前两篇 + 等N篇
+    prefix2 = " + ".join(cleaned_items[:2])
+    cand2 = f"{prefix2} 等{total_count}篇"
+    if len(cand2) <= max_len:
+        return cand2, total_count
+
+    # 兜底：第一篇 + 等N篇
+    cand1 = f"{cleaned_items[0]} 等{total_count}篇"
+    return cand1, total_count
+
+def ensure_history_sorted_and_timed(history: list) -> list:
+    """
+    确保历史战役记录具备规范的 start_t / end_t，并严格按真实战役时间升序（从早到晚）单调排列。
+    使长图编目编号 (#1, #2, #3...) 与时间修改指令序号永远 100% 对应一致。
+    """
+    if not history or not isinstance(history, list):
+        return []
+
+    for h in history:
+        if not isinstance(h, dict):
+            continue
+        st = h.get("start_t") or 0
+        et = h.get("end_t") or 0
+        # 若缺失 start_t，从 log_timeline 尝试解析
+        if not st:
+            tl = str(h.get("log_timeline") or "").strip()
+            if tl:
+                s_calc, e_calc = _detect_log_time_range(None, tl)
+                if s_calc:
+                    st = s_calc
+                    et = e_calc or (s_calc + 86399)
+                else:
+                    dt = _parse_time_str(tl)
+                    if dt:
+                        st = dt
+                        et = dt + 86399
+        # 若仍缺失，从 created_at 尝试解析
+        if not st:
+            cr = str(h.get("created_at") or "").strip()
+            dt_cr = _parse_time_str(cr)
+            if dt_cr:
+                st = dt_cr
+                et = dt_cr + 86399
+        h["start_t"] = st
+        h["end_t"] = et
+
+    history.sort(key=lambda h: (
+        0 if (h.get("start_t") or 0) > 0 else 1,
+        h.get("start_t") or 0,
+        h.get("end_t") or 0,
+        _parse_time_str(h.get("created_at", "")) or 0
+    ))
+    return history
+
+def render_library_archive_image(data: dict, role_title: str = "PL 玩家") -> bytes:
+    """渲染图书馆古典卷宗风格的玩家跑团成长档案卡长图，包含双雷达图对比与时序荣誉称号长廊"""
+    fonts = _load_library_archive_fonts()
+    width = 1060
+    
+    # 古典档案馆羊皮纸质感色彩
+    bg_color = (248, 244, 234)
+    border_primary = (115, 84, 52)
+    border_secondary = (195, 170, 135)
+    header_bg = (58, 36, 26)
+    header_gold = (245, 232, 205)
+    header_sub = (205, 190, 165)
+    text_primary = (38, 28, 22)
+    text_secondary = (105, 90, 80)
+    stamp_red = (180, 42, 42)
+    card_bg = (254, 252, 248)
+    card_border = (220, 205, 185)
+    
+    hist = ensure_history_sorted_and_timed(data.get("history", []) if isinstance(data, dict) else [])
+    if isinstance(data, dict):
+        data["history"] = hist
+    
+    # 动态高度计算
+    titles_rows = len([h for h in hist if h.get("titles")])
+    dynamic_h = 125 + 195 + 380 + max(100, titles_rows * 38 + 60) + (len(hist) * 42 + 70) + 160
+    height = max(1160, dynamic_h)
+    
+    img = Image.new("RGBA", (width, height), bg_color)
+    draw = ImageDraw.Draw(img)
+    
+    # 1. 外层复古双饰框
+    draw.rectangle([12, 12, width - 13, height - 13], outline=border_primary, width=2)
+    draw.rectangle([18, 18, width - 19, height - 19], outline=border_secondary, width=1)
+    
+    # 四角古典折角花纹
+    for x, y, dx, dy in [(24, 24, 1, 1), (width - 25, 24, -1, 1), (24, height - 25, 1, -1), (width - 25, height - 25, -1, -1)]:
+        draw.line([(x, y), (x + 20 * dx, y)], fill=border_primary, width=2)
+        draw.line([(x, y), (x, y + 20 * dy)], fill=border_primary, width=2)
+        draw.line([(x + 6 * dx, y + 6 * dy), (x + 16 * dx, y + 6 * dy)], fill=border_secondary, width=1)
+        draw.line([(x + 6 * dx, y + 6 * dy), (x + 6 * dx, y + 16 * dy)], fill=border_secondary, width=1)
+
+    # 2. 标头横幅
+    draw.rectangle([25, 25, width - 26, 125], fill=header_bg)
+    draw.rectangle([28, 28, width - 29, 122], outline=header_gold, width=1)
+    
+    draw.text((45, 42), f"◆ 跑团档案年鉴 · 风格与战绩编年卷宗 ({role_title})", font=fonts['title'], fill=header_gold)
+    draw.text((48, 88), "ARCHIVAL DOSSIER & CHRONICLED TRPG CAREER", font=fonts['subtitle'], fill=header_sub)
+    
+    # 右上角古典印章
+    stamp_w, stamp_h = 170, 76
+    stamp_x, stamp_y = width - 200, 36
+    draw.rounded_rectangle([stamp_x, stamp_y, stamp_x + stamp_w, stamp_y + stamp_h], radius=6, outline=stamp_red, width=2)
+    draw.rounded_rectangle([stamp_x + 3, stamp_y + 3, stamp_x + stamp_w - 3, stamp_y + stamp_h - 3], radius=4, outline=stamp_red, width=1)
+    
+    txt_stamp1 = "【 馆藏绝密 】"
+    w1 = fonts['stamp_bold'].getlength(txt_stamp1)
+    draw.text((stamp_x + (stamp_w - w1) / 2, stamp_y + 14), txt_stamp1, font=fonts['stamp_bold'], fill=stamp_red)
+    
+    txt_stamp2 = "CLASSIFIED ARCHIVE"
+    w2 = fonts['small_bold'].getlength(txt_stamp2)
+    draw.text((stamp_x + (stamp_w - w2) / 2, stamp_y + 44), txt_stamp2, font=fonts['small_bold'], fill=stamp_red)
+
+    curr_y = 145
+
+    # 3. 档案基本信息卡片
+    draw.rounded_rectangle([35, curr_y, width - 36, curr_y + 175], radius=8, fill=card_bg, outline=card_border, width=1)
+    
+    target_name = data.get("target") or "未知调查员"
+    qq_str = data.get("qq") or "未知"
+    total_rec = data.get("total_records") or len(hist)
+    first_seen = data.get("first_seen") or "未知"
+    last_updated = (data.get("last_updated") or "未知").split(" ")[0]
+    
+    grades = [h.get("grade") for h in hist if h.get("grade")]
+    peak_grade = grades[0] if grades else "未评级"
+    grade_weight = {'EX': 100, 'S+': 95, 'S': 90, 'A+': 85, 'A': 80, 'B+': 75, 'B': 70, 'C': 60}
+    if grades:
+        peak_grade = max(grades, key=lambda g: grade_weight.get(g, 50))
+    latest_grade = grades[-1] if grades else "未评级"
+    
+    def _safe_char_count(entry):
+        if not isinstance(entry, dict):
+            return 0
+        st = entry.get("stats")
+        if not isinstance(st, dict):
+            return 0
+        cnt = st.get("char_count") or st.get("total_chars") or st.get("rp_chars")
+        if cnt is None:
+            return 0
+        try:
+            return int(cnt)
+        except (ValueError, TypeError):
+            return 0
+
+    total_chars = sum(_safe_char_count(h) for h in hist)
+    chars_str = f"{total_chars:,} 字" if total_chars else "以日志为准"
+
+    # 左列信息
+    draw.text((55, curr_y + 16), f"归档对象: {target_name}", font=fonts['h2'], fill=border_primary)
+    draw.text((55, curr_y + 52), f"识别账号: QQ {qq_str}", font=fonts['body'], fill=text_primary)
+    draw.text((55, curr_y + 78), f"卷宗类别: {role_title} 专属轨迹", font=fonts['body'], fill=text_primary)
+    
+    # 右列信息 (从 X=500 开始)
+    total_rec = len(hist)
+    total_logs = 0
+    for h in hist:
+        _, sc = format_archive_sources_display(h.get("sources"))
+        total_logs += sc
+    if total_logs > total_rec:
+        rec_display_str = f"收录战役: 累计 {total_rec} 场 (复合共 {total_logs} 篇) | 参演总字数: {chars_str}"
+    else:
+        rec_display_str = f"收录战役: 累计 {total_rec} 场 | 参演总字数: {chars_str}"
+
+    draw.text((500, curr_y + 18), f"编撰时跨: {first_seen} ~ {last_updated}", font=fonts['body'], fill=text_primary)
+    draw.text((500, curr_y + 48), rec_display_str, font=fonts['body'], fill=text_primary)
+    draw.text((500, curr_y + 78), f"巅峰评级: ★ {peak_grade}  (最新战役评级: {latest_grade})", font=fonts['body_bold'], fill=stamp_red)
+
+    # 细分隔线
+    draw.line([(55, curr_y + 108), (width - 55, curr_y + 108)], fill=(235, 225, 210), width=1)
+
+    # 底端整行 1: 历次评级走势
+    if len(grades) > 1:
+        draw.text((55, curr_y + 116), f"历次评级走势: {' -> '.join(grades[-10:])}", font=fonts['small_bold'], fill=text_secondary)
+    else:
+        draw.text((55, curr_y + 116), f"综合表现评级: ★ {peak_grade}", font=fonts['small_bold'], fill=text_secondary)
+
+    # 底端整行 2: 关联角色 (自动测量截断保护，彻底防止文字重叠)
+    aliases = [str(a) for a in data.get("aliases", []) if a and not str(a).startswith("用户_")]
+    if aliases:
+        alias_str = "关联角色: " + "、".join(aliases)
+        while len(alias_str) > 8 and fonts['small'].getlength(alias_str) > (width - 120):
+            alias_str = alias_str[:-2] + "…"
+        draw.text((55, curr_y + 142), alias_str, font=fonts['small'], fill=text_secondary)
+
+    curr_y += 195
+
+    # 4. 双雷达图对比区域 (根据身份智能匹配提示词推荐的六维能力)
+    is_kp = ("KP" in str(role_title).upper()) or (data.get("role") == "KP")
+    default_axes = KP_RADAR_AXES if is_kp else PL_RADAR_AXES
+
+    # 提取历史中已存在的雷达数据维度
+    candidate_keys = []
+    for h in hist:
+        r = h.get("radar")
+        if isinstance(r, dict):
+            for k in r.keys():
+                k_norm = normalize_dimension_name(k)
+                if k_norm and k_norm not in candidate_keys:
+                    candidate_keys.append(k_norm)
+
+    if sum(1 for a in default_axes if a in candidate_keys) >= 3:
+        axes = list(default_axes)
+    elif len(candidate_keys) == 6:
+        axes = candidate_keys
+    else:
+        axes = list(default_axes)
+    
+    last_battle = hist[-1] if hist else {}
+    last_radar = (last_battle.get("radar") or {}) if isinstance(last_battle, dict) else {}
+    if not isinstance(last_radar, dict):
+        last_radar = {}
+
+    def _get_radar_val(r_dict, axis_name):
+        if not isinstance(r_dict, dict):
+            return 0
+        v = r_dict.get(axis_name)
+        if v is not None:
+            try: return int(float(v))
+            except (ValueError, TypeError): pass
+        for k, val in r_dict.items():
+            if normalize_dimension_name(k) == axis_name:
+                try: return int(float(val))
+                except (ValueError, TypeError): pass
+        return 0
+
+    def calc_score(h):
+        if not isinstance(h, dict):
+            return 0.0
+        r = h.get("radar")
+        if not isinstance(r, dict):
+            return 0.0
+        total = 0.0
+        for a in axes:
+            total += _get_radar_val(r, a)
+        return total
+        
+    best_battle = max(hist, key=calc_score) if hist else {}
+    best_radar = (best_battle.get("radar") or {}) if isinstance(best_battle, dict) else {}
+    if not isinstance(best_radar, dict):
+        best_radar = {}
+    
+    draw.line([(40, curr_y), (width - 41, curr_y)], fill=border_secondary, width=1)
+    curr_y += 14
+    draw.text((40, curr_y), "◆ 六维能力双轨雷达对照 (RECENT vs PEAK PERFORMANCE)", font=fonts['h2'], fill=border_primary)
+    curr_y += 36
+    
+    radar_area_top = curr_y
+    rc_x = 230
+    rc_y = radar_area_top + 145
+    r_radius = 115
+    
+    points = []
+    for i in range(6):
+        angle = -math.pi / 2 + i * math.pi / 3
+        points.append((rc_x + math.cos(angle) * r_radius, rc_y + math.sin(angle) * r_radius))
+        
+    for level in (0.25, 0.5, 0.75, 1.0):
+        ring = [(rc_x + (px - rc_x) * level, rc_y + (py - rc_y) * level) for px, py in points]
+        draw.line(ring + [ring[0]], fill=border_secondary, width=1)
+        
+    for pt, ax in zip(points, axes):
+        draw.line([(rc_x, rc_y), pt], fill=border_secondary, width=1)
+        off_x = -24 if pt[0] < rc_x - 10 else (8 if pt[0] > rc_x + 10 else -16)
+        off_y = -20 if pt[1] < rc_y - 10 else (6 if pt[1] > rc_y + 10 else -8)
+        draw.text((pt[0] + off_x, pt[1] + off_y), ax, font=fonts['small_bold'], fill=text_primary)
+
+    # 历史巅峰雷达 (红色)
+    best_pts = []
+    for pt, ax in zip(points, axes):
+        val = _get_radar_val(best_radar, ax)
+        ratio = max(0.15, min(100.0, val) / 100.0) if val > 0 else 0.15
+        best_pts.append((rc_x + (pt[0] - rc_x) * ratio, rc_y + (pt[1] - rc_y) * ratio))
+        
+    # 最近一次雷达 (蓝色)
+    last_pts = []
+    for pt, ax in zip(points, axes):
+        val = _get_radar_val(last_radar, ax)
+        ratio = max(0.15, min(100.0, val) / 100.0) if val > 0 else 0.15
+        last_pts.append((rc_x + (pt[0] - rc_x) * ratio, rc_y + (pt[1] - rc_y) * ratio))
+
+    # 半透明填充图层
+    poly_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    pdraw = ImageDraw.Draw(poly_layer)
+    pdraw.polygon(best_pts, fill=(192, 57, 43, 60))
+    pdraw.polygon(last_pts, fill=(41, 128, 185, 75))
+    img.alpha_composite(poly_layer)
+    draw = ImageDraw.Draw(img)
+    
+    # 轮廓线与端点
+    draw.line(best_pts + [best_pts[0]], fill=(192, 57, 43), width=3)
+    for bx, by in best_pts:
+        draw.ellipse([bx - 4, by - 4, bx + 4, by + 4], fill=(192, 57, 43))
+        
+    draw.line(last_pts + [last_pts[0]], fill=(41, 128, 185), width=3)
+    for lx, ly in last_pts:
+        draw.ellipse([lx - 4, ly - 4, lx + 4, ly + 4], fill=(41, 128, 185))
+
+    # 右侧图例与六维对照表格
+    t_left = 490
+    t_top = radar_area_top + 10
+    
+    last_title = last_battle.get("log_timeline") or "最近战役"
+    best_title = best_battle.get("log_timeline") or "历史巅峰"
+    best_score_total = int(calc_score(best_battle))
+    last_score_total = int(calc_score(last_battle))
+    
+    draw.rectangle([t_left, t_top, t_left + 16, t_top + 16], fill=(41, 128, 185))
+    draw.text((t_left + 26, t_top), f"最近战役: {last_title} (总分 {last_score_total} | 评级 {last_battle.get('grade','-')})", font=fonts['body_bold'], fill=text_primary)
+    
+    draw.rectangle([t_left, t_top + 28, t_left + 16, t_top + 44], fill=(192, 57, 43))
+    draw.text((t_left + 26, t_top + 28), f"历史巅峰: {best_title} (总分 {best_score_total} | 评级 {best_battle.get('grade','-')}) ★", font=fonts['body_bold'], fill=stamp_red)
+
+    # 绘制对照小表格 (宽度 530px，列宽分布均匀)
+    tbl_y = t_top + 65
+    tbl_w = width - 40 - t_left
+    draw.rectangle([t_left, tbl_y, t_left + tbl_w, tbl_y + 200], fill=card_bg, outline=card_border, width=1)
+    draw.rectangle([t_left, tbl_y, t_left + tbl_w, tbl_y + 28], fill=(235, 225, 210))
+    
+    draw.text((t_left + 25, tbl_y + 5), "能力维度", font=fonts['small_bold'], fill=border_primary)
+    draw.text((t_left + 145, tbl_y + 5), "最近得分", font=fonts['small_bold'], fill=(41, 128, 185))
+    draw.text((t_left + 255, tbl_y + 5), "历史最高", font=fonts['small_bold'], fill=(192, 57, 43))
+    draw.text((t_left + 375, tbl_y + 5), "成长状态", font=fonts['small_bold'], fill=text_secondary)
+    
+    for row_idx, ax in enumerate(axes):
+        ry = tbl_y + 32 + row_idx * 27
+        l_v = _get_radar_val(last_radar, ax)
+        b_v = _get_radar_val(best_radar, ax)
+        diff = l_v - b_v
+        if diff >= 0 and l_v > 0:
+            status_str = "★ 达成极值"
+            stat_color = stamp_red
+        elif diff >= -5 and l_v > 0:
+            status_str = "◆ 高位平稳"
+            stat_color = (160, 90, 30)
+        elif l_v > 0:
+            status_str = f"▼ 较峰值 {diff}"
+            stat_color = text_secondary
+        else:
+            status_str = "— 尚待测评"
+            stat_color = text_secondary
+            
+        draw.line([(t_left + 10, ry), (t_left + tbl_w - 10, ry)], fill=(240, 235, 225), width=1)
+        draw.text((t_left + 25, ry + 4), ax, font=fonts['small'], fill=text_primary)
+        draw.text((t_left + 160, ry + 4), str(l_v) if l_v > 0 else "-", font=fonts['small_bold'], fill=(41, 128, 185))
+        draw.text((t_left + 270, ry + 4), str(b_v) if b_v > 0 else "-", font=fonts['small_bold'], fill=(192, 57, 43))
+        draw.text((t_left + 375, ry + 4), status_str, font=fonts['small'], fill=stat_color)
+
+    curr_y = radar_area_top + 310
+
+    # 5. 荣誉与风味称号编年长廊 (时序全量保留，弹性列宽杜绝任何文本撞车)
+    draw.line([(40, curr_y), (width - 41, curr_y)], fill=border_secondary, width=1)
+    curr_y += 14
+    draw.text((40, curr_y), "◆ 荣誉与风味称号编年长廊 (TITLES CHRONICLE)", font=fonts['h2'], fill=border_primary)
+    curr_y += 36
+    
+    chronological_titles = []
+    for h in hist:
+        tl = h.get("log_timeline") or (h.get("created_at") or "").split(" ")[0] or "未知时期"
+        ts = h.get("titles") or []
+        disp_name, _ = format_archive_sources_display(h.get("sources"), max_len=22, show_count=False)
+        if ts:
+            chronological_titles.append({
+                "timeline": tl,
+                "titles": ts,
+                "battle": disp_name
+            })
+            
+    if chronological_titles:
+        for item in chronological_titles:
+            draw.line([(60, curr_y - 10), (60, curr_y + 25)], fill=border_primary, width=2)
+            draw.ellipse([54, curr_y + 4, 66, curr_y + 16], fill=header_bg, outline=border_primary, width=2)
+            
+            # 日期列 (固定预留 255px: X=80 ~ X=335)
+            draw.text((80, curr_y + 2), f"[{item['timeline']}]", font=fonts['body_bold'], fill=border_primary)
+            
+            # 战役名列 (从 X=345 开始，限制最大宽度 230px)
+            raw_b = f"《{item['battle']}》"
+            clean_b = raw_b
+            while len(clean_b) > 4 and fonts['body'].getlength(clean_b) > 230:
+                clean_b = clean_b[:-3] + "…》"
+            draw.text((345, curr_y + 2), clean_b, font=fonts['body'], fill=text_secondary)
+            
+            # 获封称号列 (从 X=595 开始，预留 420px+)
+            t_str = "、".join([f"【{t}】" for t in item['titles']])
+            raw_title_line = f"获封称号 -> {t_str}"
+            clean_title_line = raw_title_line
+            while len(clean_title_line) > 8 and fonts['body_bold'].getlength(clean_title_line) > (width - 615):
+                clean_title_line = clean_title_line[:-2] + "…"
+            draw.text((595, curr_y + 2), clean_title_line, font=fonts['body_bold'], fill=stamp_red)
+            curr_y += 36
+    else:
+        draw.text((80, curr_y), "（暂未收录风味称号，在开启风格分析后将按战役时序永久归档）", font=fonts['body'], fill=text_secondary)
+        curr_y += 32
+
+    curr_y += 15
+
+    # 6. 馆藏收录战役编目 (固定互斥网格布局，彻底杜绝重合)
+    draw.line([(40, curr_y), (width - 41, curr_y)], fill=border_secondary, width=1)
+    curr_y += 14
+    draw.text((40, curr_y), "◆ 馆藏收录战役编目 (ARCHIVED BATTLES CATALOG)", font=fonts['h2'], fill=border_primary)
+    curr_y += 36
+    
+    for idx, h in enumerate(hist, 1):
+        tl = h.get("log_timeline") or "未知时间"
+        grd = h.get("grade") or "-"
+        disp_name, src_count = format_archive_sources_display(h.get("sources"), max_len=26, show_count=False)
+        c_cnt = _safe_char_count(h)
+        if c_cnt:
+            c_tip = f"{c_cnt:,}字 [共{src_count}篇]" if src_count > 1 else f"{c_cnt:,}字"
+        else:
+            c_tip = f"[共{src_count}篇]" if src_count > 1 else ""
+        is_best = (h == best_battle)
+        
+        bg_bar = (244, 238, 226) if idx % 2 == 1 else card_bg
+        draw.rounded_rectangle([40, curr_y, width - 40, curr_y + 34], radius=4, fill=bg_bar)
+        
+        badge_color = stamp_red if is_best else border_primary
+        # 1. 序号列
+        draw.text((50, curr_y + 6), f"#{idx}", font=fonts['body_bold'], fill=badge_color)
+        # 2. 时间跨度列 (X=95 ~ 340)
+        draw.text((95, curr_y + 6), f"[{tl}]", font=fonts['body'], fill=text_primary)
+        # 3. 战役名列 (从 X=345 开始，限制宽度 320px)
+        b_name_raw = f"《{disp_name}》"
+        b_name_clean = b_name_raw
+        while len(b_name_clean) > 4 and fonts['body_bold'].getlength(b_name_clean) > 320:
+            b_name_clean = b_name_clean[:-3] + "…》"
+        draw.text((345, curr_y + 6), b_name_clean, font=fonts['body_bold'], fill=text_primary)
+        # 4. 评级列
+        draw.text((675, curr_y + 6), f"评级: {grd}", font=fonts['body_bold'], fill=stamp_red if 'S' in grd or 'EX' in grd else text_primary)
+        # 5. 字数列与多篇标识
+        if c_tip:
+            draw.text((780, curr_y + 6), c_tip, font=fonts['small'], fill=text_secondary)
+        # 6. 巅峰标签列
+        if is_best:
+            draw.text((895, curr_y + 6), "★ 历史最高总分", font=fonts['small_bold'], fill=stamp_red)
+        curr_y += 40
+
+    curr_y += 15
+
+    # 7. 修补提示与页脚 (同时支持时间纠偏指令与档案改名指令，明确本人绑定QQ权限)
+    draw.rounded_rectangle([40, curr_y, width - 40, curr_y + 68], radius=6, fill=(240, 232, 218), outline=border_secondary, width=1)
+    draw.text((55, curr_y + 8), "[!] 卷宗档案维护指令提示（仅限绑定本档案QQ的本人操作）：", font=fonts['small_bold'], fill=border_primary)
+    draw.text((55, curr_y + 26), f"   ◆ 战役时间纠偏：.风格 档案时间 <战役序号#1,2...> <正确时间(如 2024-03-15 或 2023-09~2023-10)>", font=fonts['small'], fill=text_primary)
+    draw.text((55, curr_y + 46), f"   ◆ 归档对象改名：.风格 档案改名 <新名字>  或直接发送  .档案改名 <新名字>", font=fonts['small'], fill=text_primary)
+    
+    curr_y += 85
+    draw.line([(40, curr_y), (width - 41, curr_y)], fill=border_secondary, width=1)
+    footer_str = "SealDice Archive Library · 个人成长轨迹数字化存储中心 · 绝密卷宗"
+    fw = fonts['small'].getlength(footer_str)
+    draw.text(((width - fw) / 2, curr_y + 10), footer_str, font=fonts['small'], fill=text_secondary)
+
+    buf = BytesIO()
+    img.convert("RGB").save(buf, format="PNG", quality=95)
+    return buf.getvalue()
+
+def update_player_archive_timeline(target_query: str, battle_idx=None, new_timeline: str = "", identity_filter: str = "pl", battle_keyword: str = "", operator_qq: str = "") -> dict:
+    """修补玩家档案中某场战役的时间跨度，并自动重新时序排序与刷新成长档案图（仅限档案归属者修改）"""
+    if not os.path.isdir(STYLE_ARCHIVES_DIR):
+        return {"success": False, "msg": "档案库为空，尚未建立任何玩家成长档案。"}
+
+    base_dir = os.path.realpath(STYLE_ARCHIVES_DIR)
+    query = str(target_query or "").strip()
+    clean_q = re.sub(r'^(?:QQ[:：]|OpenQQ:)?', '', query, flags=re.IGNORECASE).strip()
+    if not clean_q:
+        return {"success": False, "msg": "缺少目标对象参数 (QQ号或角色名)"}
+
+    new_timeline_str = str(new_timeline or "").strip()
+    if not new_timeline_str:
+        return {"success": False, "msg": "缺少新的时间轴参数 (如 2024-03-15 或 2023-09~2023-10)"}
+
+    target_dir = None
+    m_qq = re.search(r'\b(\d{5,12})\b', clean_q)
+    if m_qq:
+        qq_num = m_qq.group(1)
+        qq_dir = os.path.realpath(os.path.join(base_dir, qq_num))
+        if os.path.isdir(qq_dir):
+            target_dir = qq_dir
+            name_candidate = re.sub(r'\b\d{5,12}\b', '', clean_q).strip()
+            name_candidate = re.sub(r'^[,，、\s/|;；]+|[,，、\s/|;；]+$', '', name_candidate).strip()
+            if name_candidate:
+                _merge_alias_dir_into_qq(base_dir, qq_num, name_candidate)
+
+    if not target_dir:
+        direct = os.path.realpath(os.path.join(base_dir, _sanitize_filename(clean_q)))
+        if os.path.isdir(direct):
+            target_dir = direct
+
+    if not target_dir:
+        linked_qq = _find_linked_qq_by_alias(clean_q, base_dir)
+        if linked_qq:
+            l_dir = os.path.realpath(os.path.join(base_dir, linked_qq))
+            if os.path.isdir(l_dir):
+                target_dir = l_dir
+
+    if not target_dir:
+        for entry in os.listdir(base_dir):
+            edir = os.path.join(base_dir, entry)
+            if not os.path.isdir(edir):
+                continue
+            for sub in ("pl", "kp"):
+                tf = os.path.join(edir, sub, "growth_timeline.json")
+                if os.path.exists(tf):
+                    try:
+                        with open(tf, "r", encoding="utf-8") as f:
+                            d = json.load(f)
+                        if d.get("qq") == clean_q or d.get("target") == clean_q or entry == clean_q or clean_q in d.get("aliases", []):
+                            target_dir = edir
+                            break
+                        for h in d.get("history", []):
+                            if h.get("target") == clean_q or clean_q in h.get("aliases", []):
+                                target_dir = edir
+                                break
+                    except Exception:
+                        pass
+            if target_dir:
+                break
+
+    if not target_dir:
+        return {"success": False, "msg": f"未找到关于【{query}】的成长档案。"}
+
+    _migrate_legacy_archive_if_needed(target_dir)
+
+    # 鉴权校验：仅限绑定了QQ号的用户且与QQ号相同的用户进行调整
+    archive_qq = ""
+    dir_basename = os.path.basename(target_dir)
+    if re.match(r'^\d{5,12}$', dir_basename):
+        archive_qq = dir_basename
+
+    for sub in ("pl", "kp"):
+        tf_chk = os.path.join(target_dir, sub, "growth_timeline.json")
+        if os.path.exists(tf_chk):
+            try:
+                with open(tf_chk, "r", encoding="utf-8") as f_chk:
+                    d_chk = json.load(f_chk)
+                if d_chk.get("qq"):
+                    archive_qq = str(d_chk.get("qq")).strip()
+                    break
+            except Exception:
+                pass
+
+    is_admin = str(operator_qq or '').lower().strip() in ('admin', 'master', 'root')
+    clean_op_qq = re.sub(r'\D+', '', str(operator_qq or '')).strip()
+    clean_arc_qq = re.sub(r'\D+', '', str(archive_qq or '')).strip()
+
+    if not is_admin:
+        if clean_arc_qq:
+            if not clean_op_qq:
+                return {
+                    "success": False,
+                    "msg": f"❌ 权限拒绝：该战役档案归属于 QQ【{clean_arc_qq}】。调整档案仅限绑定了 QQ 号的本人操作，请先绑定 QQ 或使用真实 QQ 发送指令。"
+                }
+            if clean_op_qq != clean_arc_qq:
+                return {
+                    "success": False,
+                    "msg": f"❌ 权限拒绝：该战役档案归属于 QQ【{clean_arc_qq}】，当前操作者 QQ 为【{clean_op_qq}】。严禁越权调整他人的档案战役！"
+                }
+        elif not clean_op_qq:
+            return {
+                "success": False,
+                "msg": "❌ 权限拒绝：调整档案战役时间仅限已绑定 QQ 号的用户操作，请先绑定原 QQ 号或使用真实 QQ 发送。"
+            }
+
+    role_sub = "kp" if str(identity_filter or "").lower() in ("kp", "主持", "主持人", "dm") else "pl"
+    role_dir = os.path.join(target_dir, role_sub)
+    timeline_path = os.path.join(role_dir, "growth_timeline.json")
+
+    # 若指定角色的 timeline 不存在但另一角色存在，自动平滑切换
+    if not os.path.exists(timeline_path):
+        alt_sub = "pl" if role_sub == "kp" else "kp"
+        alt_path = os.path.join(target_dir, alt_sub, "growth_timeline.json")
+        if os.path.exists(alt_path):
+            role_sub = alt_sub
+            role_dir = os.path.join(target_dir, role_sub)
+            timeline_path = alt_path
+        else:
+            return {"success": False, "msg": f"未找到【{query}】的【{role_sub.upper()}】档案数据。"}
+
+    try:
+        with open(timeline_path, "r", encoding="utf-8") as f:
+            timeline_data = json.load(f)
+    except Exception as e:
+        return {"success": False, "msg": f"读取档案文件失败: {e}"}
+
+    history = ensure_history_sorted_and_timed(timeline_data.get("history", []))
+    timeline_data["history"] = history
+    if not history:
+        return {"success": False, "msg": f"【{query}】的档案中暂无任何战役记录可供修改。"}
+
+    # 定位战役目标
+    target_entry = None
+    orig_idx = -1
+
+    clean_kw = str(battle_keyword or "").strip()
+    if clean_kw:
+        for idx, h in enumerate(history, 1):
+            src_str = " ".join([str(s.get("key") if isinstance(s, dict) else s) for s in h.get("sources", [])])
+            if clean_kw in src_str or clean_kw in str(h.get("record_id", "")) or clean_kw in str(h.get("log_timeline", "")):
+                target_entry = h
+                orig_idx = idx
+                break
+
+    if target_entry is None:
+        clean_idx_str = str(battle_idx or "").strip()
+        m_num = re.search(r'\d+', clean_idx_str)
+        if m_num:
+            try:
+                b_num = int(m_num.group(0))
+                if 1 <= b_num <= len(history):
+                    target_entry = history[b_num - 1]
+                    orig_idx = b_num
+                elif b_num == 0:
+                    target_entry = history[-1]
+                    orig_idx = len(history)
+                else:
+                    return {"success": False, "msg": f"战役序号 #{b_num} 超出范围 (当前共有 {len(history)} 场战役，请输入 1~{len(history)})"}
+            except ValueError:
+                pass
+        elif clean_idx_str in ("-1", "last", "最新", "最后"):
+            target_entry = history[-1]
+            orig_idx = len(history)
+
+    if target_entry is None:
+        # 默认修改最后一场（最新）战役
+        target_entry = history[-1]
+        orig_idx = len(history)
+
+    old_timeline = target_entry.get("log_timeline") or "未知时间"
+
+    # 解析新时间跨度
+    start_t, end_t = _detect_log_time_range(None, new_timeline_str)
+    if start_t == 0:
+        dt = _parse_time_str(new_timeline_str)
+        if dt:
+            start_t = dt
+            end_t = dt + 86399
+        else:
+            start_t = target_entry.get("start_t", 0)
+            end_t = target_entry.get("end_t", start_t)
+    elif end_t == 0:
+        end_t = start_t + 86399
+
+    target_entry["log_timeline"] = new_timeline_str
+    target_entry["start_t"] = start_t
+    target_entry["end_t"] = end_t
+
+    # 同步修改 records/<record_id>.json
+    rec_id = target_entry.get("record_id")
+    if rec_id:
+        rec_f = os.path.join(role_dir, "records", f"{rec_id}.json")
+        if os.path.isfile(rec_f):
+            try:
+                with open(rec_f, "r", encoding="utf-8") as rf:
+                    rec_obj = json.load(rf)
+                rec_obj["log_timeline"] = new_timeline_str
+                rec_obj["start_t"] = start_t
+                rec_obj["end_t"] = end_t
+                with open(rec_f, "w", encoding="utf-8") as rf:
+                    json.dump(rec_obj, rf, ensure_ascii=False, indent=2)
+            except Exception as e_rf:
+                print(f"[时间修补] 同步单场记录失败: {e_rf}")
+
+    # 全量重新按时间升序单调排序
+    history = ensure_history_sorted_and_timed(history)
+    timeline_data["history"] = history
+    new_idx = history.index(target_entry) + 1
+
+    # 重算 first_seen
+    valid_starts = [h.get("start_t") for h in history if h.get("start_t")]
+    if valid_starts:
+        timeline_data["first_seen"] = time.strftime('%Y-%m-%d', time.localtime(min(valid_starts)))
+
+    timeline_data["total_records"] = len(history)
+
+    with open(timeline_path, "w", encoding="utf-8") as f:
+        json.dump(timeline_data, f, ensure_ascii=False, indent=2)
+
+    # 重新渲染最新图书馆档案长图并缓存
+    role_label = "PL 玩家" if role_sub == "pl" else "KP 主持"
+    try:
+        img_bytes = render_library_archive_image(timeline_data, role_label)
+    except Exception as e:
+        print(f"[时间修补] 重新渲染长图失败: {e}")
+        img_bytes = None
+    job_id = str(uuid.uuid4())
+    if img_bytes:
+        JOB_CACHE[job_id] = {'status': 'done', 'images': [img_bytes], 'created': time.time()}
+
+    disp_b_name, _ = format_archive_sources_display(target_entry.get("sources"), max_len=26, show_count=False)
+    t_name = timeline_data.get("target") or clean_q
+    return {
+        "success": True,
+        "msg": f"✅ 已成功将【{t_name}】第 #{orig_idx} 场战役《{disp_b_name}》的时间跨度修正为【{new_timeline_str}】！\n时序重排后当前位于第 #{new_idx}/{len(history)} 场。",
+        "target": t_name,
+        "qq": timeline_data.get("qq") or "",
+        "role": role_sub.upper(),
+        "battle_name": disp_b_name,
+        "old_timeline": old_timeline,
+        "new_timeline": new_timeline_str,
+        "old_index": orig_idx,
+        "new_index": new_idx,
+        "total_records": len(history),
+        "id": job_id,
+        "image_count": 1 if img_bytes else 0
+    }
+def _heal_archive_history_if_needed(target_dir: str, role_subdir: str, timeline_data: dict) -> bool:
+    """自愈修复历史记录：若 radar 为空、全0或非标准维度，自动从 records/{record_id}.json 重新解析补齐；同时修复 None/0 字数"""
+    if not isinstance(timeline_data, dict):
+        return False
+    history = timeline_data.get("history", [])
+    records_dir = os.path.join(target_dir, role_subdir, "records")
+    changed = False
+    std_axes = KP_RADAR_AXES if role_subdir == "kp" else PL_RADAR_AXES
+
+    for h in history:
+        rec_id = h.get("record_id")
+        rec_data = None
+        if rec_id and os.path.isdir(records_dir):
+            rec_json_path = os.path.join(records_dir, f"{rec_id}.json")
+            if os.path.isfile(rec_json_path):
+                try:
+                    with open(rec_json_path, "r", encoding="utf-8") as rf:
+                        rec_data = json.load(rf)
+                except Exception:
+                    pass
+
+        # 1. 自愈 radar
+        cur_radar = h.get("radar") or {}
+        needs_radar_heal = False
+        if not cur_radar:
+            needs_radar_heal = True
+        elif all(v == 0 for v in cur_radar.values()):
+            needs_radar_heal = True
+        elif sum(1 for a in std_axes if a in cur_radar) < 3:
+            needs_radar_heal = True
+
+        if needs_radar_heal and rec_data:
+            full_rep = rec_data.get("full_report") or ""
+            new_radar = extract_radar_data_from_text(full_rep)
+            if new_radar and any(v > 0 for v in new_radar.values()):
+                h["radar"] = new_radar
+                rec_data["radar"] = new_radar
+                changed = True
+                try:
+                    with open(rec_json_path, "w", encoding="utf-8") as wf:
+                        json.dump(rec_data, wf, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+
+        # 2. 自愈字数 stats
+        cur_st = h.get("stats") or {}
+        cur_chars = cur_st.get("char_count") or cur_st.get("total_chars") or 0
+        if (not cur_chars) and rec_data:
+            rec_st = rec_data.get("stats") or {}
+            rec_chars = rec_st.get("char_count") or rec_st.get("total_chars") or rec_st.get("rp_chars") or 0
+            if rec_chars:
+                h.setdefault("stats", {})["char_count"] = int(rec_chars)
+                h.setdefault("stats", {})["total_chars"] = int(rec_chars)
+                changed = True
+
+        # 3. 自愈复合 Log 来源 sources (修复多Log分析时只记录/展示单篇的问题)
+        cur_src = h.get("sources")
+        needs_src_heal = False
+        if not cur_src:
+            needs_src_heal = True
+        elif isinstance(cur_src, str) and (" + " in cur_src or "+" in cur_src):
+            needs_src_heal = True
+        elif isinstance(cur_src, list) and len(cur_src) <= 1:
+            needs_src_heal = True
+
+        if needs_src_heal and rec_data:
+            rec_src = rec_data.get("sources")
+            recovered_sources = []
+            if isinstance(rec_src, list) and len(rec_src) > 1:
+                recovered_sources = rec_src
+            elif isinstance(rec_src, str) and " + " in rec_src:
+                recovered_sources = [x.strip() for x in rec_src.split(" + ") if x.strip()]
+
+            # 若 record_data 中的 sources 依然只有单篇，尝试从 full_report 深度反解复合段落标记
+            if len(recovered_sources) <= 1:
+                full_rep = rec_data.get("full_report") or ""
+                m_segs = re.findall(r'【时间线第\s*\d+/\d+\s*段:\s*([^\s\]()（）]+)', full_rep)
+                if len(m_segs) > 1:
+                    recovered_sources = m_segs
+                else:
+                    m_fn = re.search(r'文件名(?:/来源)?\s*[：:]\s*([^\r\n]+)', full_rep)
+                    if m_fn and (" + " in m_fn.group(1) or "+" in m_fn.group(1)):
+                        parts = [x.strip() for x in re.split(r'\s*\+\s*', m_fn.group(1)) if x.strip()]
+                        if len(parts) > 1:
+                            recovered_sources = parts
+
+            cur_count = len(cur_src) if isinstance(cur_src, list) else (1 if cur_src else 0)
+            if recovered_sources and len(recovered_sources) > cur_count:
+                h["sources"] = recovered_sources
+                rec_data["sources"] = recovered_sources
+                changed = True
+                try:
+                    with open(rec_json_path, "w", encoding="utf-8") as wf:
+                        json.dump(rec_data, wf, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+
+    if changed:
+        tl_path = os.path.join(target_dir, role_subdir, "growth_timeline.json")
+        try:
+            with open(tl_path, "w", encoding="utf-8") as wf:
+                json.dump(timeline_data, wf, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[档案自愈] 保存修复数据失败: {e}")
+    return changed
+
+def rename_player_archive(target_query: str, new_name: str, identity_filter: str = "pl", operator_qq: str = "") -> dict:
+    """修改玩家档案中的归档对象名称，保留原名称到别名列表中，并自动重新渲染长图（仅限档案归属者本人修改）"""
+    if not os.path.isdir(STYLE_ARCHIVES_DIR):
+        return {"success": False, "msg": "档案库为空，尚未建立任何玩家成长档案。"}
+
+    base_dir = os.path.realpath(STYLE_ARCHIVES_DIR)
+    query = str(target_query or "").strip()
+    clean_new_name = re.sub(r'[\r\n\t]+', ' ', str(new_name or '')).strip()
+    clean_new_name = re.sub(r'^[,，、\s/|;；]+|[,，、\s/|;；]+$', '', clean_new_name).strip()
+    if not clean_new_name:
+        return {"success": False, "msg": "新档案名称不能为空。"}
+
+    clean_q = re.sub(r'^(?:QQ[:：]|OpenQQ:)?', '', query, flags=re.IGNORECASE).strip()
+    clean_q = re.sub(r'^[,，、\s/|;；]+|[,，、\s/|;；]+$', '', clean_q).strip()
+
+    target_dir = None
+    m_qq = re.search(r'\b(\d{5,12})\b', clean_q)
+    if m_qq:
+        qq_num = m_qq.group(1)
+        qq_dir = os.path.realpath(os.path.join(base_dir, qq_num))
+        if os.path.isdir(qq_dir):
+            target_dir = qq_dir
+
+    if not target_dir:
+        direct = os.path.realpath(os.path.join(base_dir, _sanitize_filename(clean_q)))
+        if os.path.isdir(direct):
+            target_dir = direct
+
+    if not target_dir:
+        linked_qq = _find_linked_qq_by_alias(clean_q, base_dir)
+        if linked_qq:
+            l_dir = os.path.realpath(os.path.join(base_dir, linked_qq))
+            if os.path.isdir(l_dir):
+                target_dir = l_dir
+
+    if not target_dir:
+        for entry in os.listdir(base_dir):
+            edir = os.path.join(base_dir, entry)
+            if not os.path.isdir(edir):
+                continue
+            for sub in ("pl", "kp"):
+                tf = os.path.join(edir, sub, "growth_timeline.json")
+                if os.path.exists(tf):
+                    try:
+                        with open(tf, "r", encoding="utf-8") as f:
+                            d = json.load(f)
+                        if d.get("qq") == clean_q or d.get("target") == clean_q or entry == clean_q or clean_q in d.get("aliases", []):
+                            target_dir = edir
+                            break
+                        for h in d.get("history", []):
+                            if h.get("target") == clean_q or clean_q in h.get("aliases", []):
+                                target_dir = edir
+                                break
+                    except Exception:
+                        pass
+            if target_dir:
+                break
+
+    if not target_dir:
+        return {"success": False, "msg": f"未找到关于【{query}】的成长档案，请确认 QQ 号或旧角色名。"}
+
+    _migrate_legacy_archive_if_needed(target_dir)
+
+    # 鉴权校验：仅限绑定了QQ号的用户且与QQ号相同的用户进行修改
+    archive_qq = ""
+    dir_basename = os.path.basename(target_dir)
+    if re.match(r'^\d{5,12}$', dir_basename):
+        archive_qq = dir_basename
+
+    for sub in ("pl", "kp"):
+        tf_chk = os.path.join(target_dir, sub, "growth_timeline.json")
+        if os.path.exists(tf_chk):
+            try:
+                with open(tf_chk, "r", encoding="utf-8") as f_chk:
+                    d_chk = json.load(f_chk)
+                if d_chk.get("qq"):
+                    archive_qq = str(d_chk.get("qq")).strip()
+                    break
+            except Exception:
+                pass
+
+    is_admin = str(operator_qq or '').lower().strip() in ('admin', 'master', 'root')
+    clean_op_qq = re.sub(r'\D+', '', str(operator_qq or '')).strip()
+    clean_arc_qq = re.sub(r'\D+', '', str(archive_qq or '')).strip()
+
+    if not is_admin:
+        if clean_arc_qq:
+            if not clean_op_qq:
+                return {
+                    "success": False,
+                    "msg": f"❌ 权限拒绝：该成长档案归属于 QQ【{clean_arc_qq}】。档案改名仅限绑定了 QQ 号的本人操作，请先绑定 QQ 或使用真实 QQ 发送指令。"
+                }
+            if clean_op_qq != clean_arc_qq:
+                return {
+                    "success": False,
+                    "msg": f"❌ 权限拒绝：该成长档案归属于 QQ【{clean_arc_qq}】，当前操作者 QQ 为【{clean_op_qq}】。严禁越权修改他人的档案！"
+                }
+        elif not clean_op_qq:
+            return {
+                "success": False,
+                "msg": "❌ 权限拒绝：修改档案名称仅限已绑定 QQ 号的用户操作，请先绑定原 QQ 号或使用真实 QQ 发送。"
+            }
+
+    filt = str(identity_filter or "pl").strip().lower()
+    targets_to_update = []
+    if filt in ("kp", "主持", "主持人", "dm"):
+        targets_to_update.append(("kp", "KP 主持"))
+    elif filt in ("all", "双重", "全部"):
+        targets_to_update.append(("pl", "PL 玩家"))
+        targets_to_update.append(("kp", "KP 主持"))
+    else:
+        if not os.path.exists(os.path.join(target_dir, "pl", "growth_timeline.json")) and os.path.exists(os.path.join(target_dir, "kp", "growth_timeline.json")):
+            targets_to_update = [("kp", "KP 主持")]
+        else:
+            targets_to_update = [("pl", "PL 玩家")]
+
+    updated_any = False
+    images = []
+    job_id = str(uuid.uuid4())
+    old_names = []
+
+    for sub, label in targets_to_update:
+        tf = os.path.join(target_dir, sub, "growth_timeline.json")
+        if not os.path.exists(tf):
+            continue
+        try:
+            with open(tf, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+
+        _heal_archive_history_if_needed(target_dir, sub, data)
+
+        old_target = data.get("target") or ""
+        if old_target and old_target != clean_new_name:
+            old_names.append(old_target)
+            aliases = data.setdefault("aliases", [])
+            if old_target not in aliases and not old_target.startswith("用户_") and not re.match(r'^\d{5,12}$', old_target):
+                aliases.append(old_target)
+
+        data["target"] = clean_new_name
+        data["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        aliases = data.setdefault("aliases", [])
+        if clean_new_name not in aliases:
+            aliases.insert(0, clean_new_name)
+
+        with open(tf, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        updated_any = True
+
+        try:
+            img_bytes = render_library_archive_image(data, label)
+            if img_bytes:
+                images.append(img_bytes)
+        except Exception as e:
+            print(f"[档案改名] 重新渲染长图失败: {e}")
+
+    if not updated_any:
+        return {"success": False, "msg": f"未能找到可更新的【{query}】档案文件。"}
+
+    if images:
+        JOB_CACHE[job_id] = {'status': 'done', 'images': images, 'created': time.time()}
+
+    old_str = f"（原归档名：{', '.join(set(old_names))}）" if old_names else ""
+    return {
+        "success": True,
+        "msg": f"✅ 档案对象已成功更名为【{clean_new_name}】{old_str}！\n原名称已保留至别名检索库，卷宗长图已重新编撰生成。",
+        "new_name": clean_new_name,
+        "target": clean_new_name,
+        "id": job_id if images else "",
+        "image_count": len(images)
+    }
+
+def _format_single_track_summary(data: dict, role_title: str) -> str:
+    lines = [
+        f"【📖 {role_title}成长档案 | {data.get('target', '未知')}】",
+        f"🔢 识别账号: {data.get('qq') or '未知'}",
+        f"📊 累计分析: {data.get('total_records', 0)} 次",
+        _format_track_content_lines(data),
+        "💡 提示: 每次在群内进行【.风格】分析时均会自动累积更新本档案。"
+    ]
+    data["summary_text"] = "\n".join(lines)
+    return data["summary_text"]
+
+def load_player_growth_summary(target_query: str, identity_filter: str = None) -> dict:
+    """按 QQ 或角色名查询玩家的跑团成长档案，支持 PL / KP 独立查询与双轨总览，并生成图书馆卷宗档案长图"""
+    if not os.path.isdir(STYLE_ARCHIVES_DIR):
+        return {"found": False, "msg": "档案库为空，尚未建立任何玩家成长档案。"}
+
+    base_dir = os.path.realpath(STYLE_ARCHIVES_DIR)
+    heal_all_player_archives()
+    query = str(target_query or "").strip()
+    clean_q = re.sub(r'^(?:QQ[:：]|OpenQQ:)?', '', query, flags=re.IGNORECASE).strip()
+
+    target_dir = None
+
+    # 1. 优先提取复合目标中的纯数字 QQ（如 "1120934969, 雅恩"）
+    m_qq = re.search(r'\b(\d{5,12})\b', clean_q)
+    if m_qq:
+        qq_num = m_qq.group(1)
+        qq_dir = os.path.realpath(os.path.join(base_dir, qq_num))
+        if os.path.isdir(qq_dir):
+            target_dir = qq_dir
+            name_candidate = re.sub(r'\b\d{5,12}\b', '', clean_q).strip()
+            name_candidate = re.sub(r'^[,，、\s/|;；]+|[,，、\s/|;；]+$', '', name_candidate).strip()
+            if name_candidate:
+                _merge_alias_dir_into_qq(base_dir, qq_num, name_candidate)
+
+    # 2. 直接命中目录名
+    if not target_dir:
+        direct = os.path.realpath(os.path.join(base_dir, _sanitize_filename(clean_q)))
+        if os.path.isdir(direct):
+            target_dir = direct
+
+    # 3. 尝试通过角色名反向查找绑定的 QQ 档案
+    if not target_dir:
+        linked_qq = _find_linked_qq_by_alias(clean_q, base_dir)
+        if linked_qq:
+            l_dir = os.path.realpath(os.path.join(base_dir, linked_qq))
+            if os.path.isdir(l_dir):
+                target_dir = l_dir
+
+    # 4. 深度扫描各目录下的 aliases 和 history
+    if not target_dir:
+        for entry in os.listdir(base_dir):
+            edir = os.path.join(base_dir, entry)
+            if not os.path.isdir(edir):
+                continue
+            found_this = False
+            for sub in ("pl", "kp"):
+                tf = os.path.join(edir, sub, "growth_timeline.json")
+                if os.path.exists(tf):
+                    try:
+                        with open(tf, "r", encoding="utf-8") as f:
+                            d = json.load(f)
+                        if d.get("qq") == clean_q or d.get("target") == clean_q or entry == clean_q:
+                            target_dir = edir
+                            found_this = True
+                            break
+                        if clean_q in d.get("aliases", []):
+                            target_dir = edir
+                            found_this = True
+                            break
+                        for h in d.get("history", []):
+                            if h.get("target") == clean_q or clean_q in h.get("aliases", []):
+                                target_dir = edir
+                                found_this = True
+                                break
+                    except Exception:
+                        pass
+                if found_this:
+                    break
+            if target_dir:
+                break
+            # 兼容旧版未迁移根文件
+            tf_legacy = os.path.join(edir, "growth_timeline.json")
+            if os.path.exists(tf_legacy):
+                try:
+                    with open(tf_legacy, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                    if d.get("qq") == clean_q or d.get("target") == clean_q or entry == clean_q:
+                        target_dir = edir
+                        break
+                except Exception:
+                    pass
+
+    if not target_dir:
+        return {"found": False, "msg": f"未找到关于【{query}】的跑团成长档案记录。"}
+
+    _migrate_legacy_archive_if_needed(target_dir)
+
+    pl_path = os.path.join(target_dir, "pl", "growth_timeline.json")
+    kp_path = os.path.join(target_dir, "kp", "growth_timeline.json")
+
+    pl_data = None
+    kp_data = None
+    if os.path.exists(pl_path):
+        try:
+            with open(pl_path, "r", encoding="utf-8") as f:
+                pl_data = json.load(f)
+        except Exception:
+            pass
+    if os.path.exists(kp_path):
+        try:
+            with open(kp_path, "r", encoding="utf-8") as f:
+                kp_data = json.load(f)
+        except Exception:
+            pass
+
+    if pl_data:
+        _heal_archive_history_if_needed(target_dir, "pl", pl_data)
+        if pl_data.get("history"):
+            ensure_history_sorted_and_timed(pl_data["history"])
+    if kp_data:
+        _heal_archive_history_if_needed(target_dir, "kp", kp_data)
+        if kp_data.get("history"):
+            ensure_history_sorted_and_timed(kp_data["history"])
+
+    images = []
+    job_id = str(uuid.uuid4())
+
+    def _try_render(timeline_obj, label):
+        try:
+            return render_library_archive_image(timeline_obj, label)
+        except Exception as err:
+            print(f"[成长档案长图渲染异常] {label} 渲染失败: {err}")
+            return None
+
+    filt = str(identity_filter or "").strip().lower()
+    if filt in ("pl", "玩家", "player"):
+        if not pl_data or not pl_data.get("history"):
+            return {"found": False, "msg": f"未找到【{query}】的 PL 玩家成长档案（可能仅有 KP 主持记录）。"}
+        summary_text = _format_single_track_summary(pl_data, "PL 玩家")
+        img_bytes = _try_render(pl_data, "PL 玩家")
+        if img_bytes:
+            images.append(img_bytes)
+            JOB_CACHE[job_id] = {'status': 'done', 'images': images, 'created': time.time()}
+        return {"found": True, "data": pl_data, "summary_text": summary_text, "id": job_id if images else "", "image_count": len(images)}
+    elif filt in ("kp", "主持", "主持人", "dm"):
+        if not kp_data or not kp_data.get("history"):
+            return {"found": False, "msg": f"未找到【{query}】的 KP 主持成长档案（可能仅有 PL 玩家记录）。"}
+        summary_text = _format_single_track_summary(kp_data, "KP 主持")
+        img_bytes = _try_render(kp_data, "KP 主持")
+        if img_bytes:
+            images.append(img_bytes)
+            JOB_CACHE[job_id] = {'status': 'done', 'images': images, 'created': time.time()}
+        return {"found": True, "data": kp_data, "summary_text": summary_text, "id": job_id if images else "", "image_count": len(images)}
+
+    has_pl = bool(pl_data and pl_data.get("history"))
+    has_kp = bool(kp_data and kp_data.get("history"))
+
+    if not has_pl and not has_kp:
+        return {"found": False, "msg": f"【{query}】的档案库中暂无任何有效记录。"}
+
+    if has_pl and not has_kp:
+        summary_text = _format_single_track_summary(pl_data, "PL 玩家")
+        img_bytes = _try_render(pl_data, "PL 玩家")
+        if img_bytes:
+            images.append(img_bytes)
+            JOB_CACHE[job_id] = {'status': 'done', 'images': images, 'created': time.time()}
+        return {"found": True, "data": pl_data, "summary_text": summary_text, "id": job_id if images else "", "image_count": len(images)}
+    elif has_kp and not has_pl:
+        summary_text = _format_single_track_summary(kp_data, "KP 主持")
+        img_bytes = _try_render(kp_data, "KP 主持")
+        if img_bytes:
+            images.append(img_bytes)
+            JOB_CACHE[job_id] = {'status': 'done', 'images': images, 'created': time.time()}
+        return {"found": True, "data": kp_data, "summary_text": summary_text, "id": job_id if images else "", "image_count": len(images)}
+
+    target_name = (pl_data or kp_data).get("target", clean_q)
+    qq_str = (pl_data or kp_data).get("qq") or "未知"
+    lines = [
+        f"【📖 跑团成长双轨档案 | {target_name}】",
+        f"🔢 识别账号: {qq_str}",
+        "",
+        f"───【 PL 玩家成长轨迹 ({pl_data.get('total_records', 0)} 次) 】───",
+        _format_track_content_lines(pl_data),
+        "",
+        f"───【 KP 主持成长轨迹 ({kp_data.get('total_records', 0)} 次) 】───",
+        _format_track_content_lines(kp_data),
+        "",
+        "💡 提示: 可使用【.风格 档案 <目标> pl】或【... kp】单独调阅单轨完整历史。"
+    ]
+    summary_text = "\n".join(lines)
+    
+    # 双轨均存在时，依次渲染 PL 与 KP 档案图
+    img_pl = _try_render(pl_data, "PL 玩家")
+    img_kp = _try_render(kp_data, "KP 主持")
+    if img_pl:
+        images.append(img_pl)
+    if img_kp:
+        images.append(img_kp)
+    if images:
+        JOB_CACHE[job_id] = {'status': 'done', 'images': images, 'created': time.time()}
+
+    return {
+        "found": True,
+        "data": {
+            "target": target_name,
+            "qq": qq_str,
+            "pl": pl_data,
+            "kp": kp_data,
+            "summary_text": summary_text
+        },
+        "summary_text": summary_text,
+        "id": job_id if images else "",
+        "image_count": len(images)
+    }
+
+
 def _name_similarity(a: str, b: str) -> float:
     """基于最长公共子串比 + 序列匹配的简单相似度。"""
     if not a or not b:
@@ -601,10 +3178,28 @@ def _name_similarity(a: str, b: str) -> float:
         return 0.0
 
 def _normalize_qq(value) -> str:
-    """从 QQ:123、纯数字等字段中提取 QQ 号。"""
+    """从 QQ:123、纯数字等字段中提取 QQ 号，排除 OpenQQ 标识。"""
     text = str(value or "").strip()
+    if text.startswith(('OpenQQ:', 'OpenQQCH:', 'OpenQQ-Member-T:', 'OpenQQ-Group:')):
+        return ""
+    if '-' in text and any(c.isalpha() for c in text):
+        return ""
     match = re.search(r'(?:QQ\s*[:：]\s*)?([1-9]\d{4,11})', text, re.IGNORECASE)
     return match.group(1) if match else ""
+
+def apply_identity_bindings(text: str, identity_bindings: dict) -> str:
+    """将日志文本中的 OpenQQ 标识精准替换为绑定的真实 QQ 号/群号。"""
+    if not text or not identity_bindings or not isinstance(identity_bindings, dict):
+        return text
+    sorted_keys = sorted(identity_bindings.keys(), key=lambda k: len(str(k)), reverse=True)
+    for official_id in sorted_keys:
+        real_qq = str(identity_bindings[official_id] or '').strip()
+        real_qq = re.sub(r'^(?:QQ|QQ-Group)\s*[:：]\s*', '', real_qq, flags=re.IGNORECASE).strip()
+        official_str = str(official_id or '').strip()
+        if not official_str or not real_qq:
+            continue
+        text = text.replace(official_str, real_qq)
+    return text
 
 def _normalize_speaker_name(value) -> str:
     text = str(value or "").strip().casefold()
@@ -1005,8 +3600,12 @@ def safe_decode(byte_content):
         except: pass
     return byte_content.decode('utf-8', errors='ignore')
 
-# --- 数据获取函数 (复用之前的逻辑) ---
+# --- 数据获取函数 (优先读本地 raw_logs_store，网络获取后自动持久化) ---
 def fetch_weizaima(key, password=None):
+    cached = load_raw_log("weizaima", key)
+    if cached and isinstance(cached, dict) and ('items' in cached or 'data' in cached):
+        return cached
+
     endpoints = [
         "https://weizaima.com/dice/api/load_data",
         "http://weizaima.com/dice/api/load_data",
@@ -1017,27 +3616,54 @@ def fetch_weizaima(key, password=None):
             if resp.status_code == 200:
                 data = resp.json()
                 if 'data' in data:
-                    return json.loads(zlib.decompress(base64.b64decode(data['data'])).decode('utf-8'))
+                    res_obj = json.loads(zlib.decompress(base64.b64decode(data['data'])).decode('utf-8'))
+                    if res_obj:
+                        save_raw_log("weizaima", key, res_obj)
+                    return res_obj
             elif resp.status_code == 404:
                 print(f"[Weizaima] 404: key={key} 未找到或密码错误 (当前尝试: {url})")
         except Exception as e:
             print(f"[Weizaima] 请求异常 ({url}): {e}")
     return None
 
-def format_weizaima_text(log_obj):
+def format_weizaima_text(log_obj, identity_bindings=None):
     if not log_obj: return ""
     items = log_obj.get('items', []) or log_obj.get('data', {}).get('items', [])
+    try:
+        items = sorted(items, key=lambda x: int(x.get('time') or 0))
+    except Exception:
+        pass
     lines = []
+    bindings = identity_bindings if isinstance(identity_bindings, dict) else {}
     for item in items[:MAX_LOG_ENTRIES]:
         message = str(item.get('message') or '')
         if not message or "[CQ:image" in message:
             continue
-        qq = _normalize_qq(item.get('IMUserId') or item.get('userId') or item.get('uniformId'))
+        raw_uid = str(item.get('uniformId') or item.get('IMUserId') or item.get('userId') or '').strip()
+        qq = ""
+        if bindings and raw_uid:
+            if raw_uid in bindings:
+                qq = str(bindings[raw_uid]).strip()
+            elif ':' in raw_uid and raw_uid.split(':', 1)[1] in bindings:
+                qq = str(bindings[raw_uid.split(':', 1)[1]]).strip()
+            else:
+                for k, v in bindings.items():
+                    if k in raw_uid:
+                        qq = str(v).strip()
+                        break
+        if not qq:
+            qq = _normalize_qq(item.get('IMUserId') or item.get('userId') or item.get('uniformId'))
         identity = f"{item.get('nickname', '?')}({qq})" if qq else item.get('nickname', '?')
         lines.append(f"{identity}: {message}")
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    if bindings:
+        result = apply_identity_bindings(result, bindings)
+    return result
 
 def fetch_trpgbot(full_id):
+    cached = load_raw_log("trpgbot", full_id)
+    if cached and isinstance(cached, str) and cached.strip():
+        return cached
     try:
         sid, log_id = full_id.split('-', 1)
         base_url = PAINTER_SERVERS[int(sid)]
@@ -1045,13 +3671,24 @@ def fetch_trpgbot(full_id):
         sess.headers.update({"Referer": "https://logpainter.trpgbot.com/"})
         meta = sess.get(f"{base_url}logReader.php", params={"m": "metaData", "id": log_id, "r": 0.1}, timeout=20).json()
         dl_url = meta.get('redirectDownloadUrl') or f"{base_url}logReader.php?m=rawData&id={log_id}"
-        return safe_decode(sess.get(dl_url, timeout=90).content)
+        res_txt = safe_decode(sess.get(dl_url, timeout=90).content)
+        if res_txt:
+            save_raw_log("trpgbot", full_id, res_txt)
+        return res_txt
     except Exception as e: print(f"TRPGBot Error: {e}"); return None
 
 def fetch_kokona(s3_key):
+    cached = load_raw_log("kokona", s3_key)
+    if cached and isinstance(cached, str) and cached.strip():
+        return cached
     try:
         resp = get_session().get(f"{KOKONA_BASE_URL}{s3_key}", timeout=60)
-        return safe_decode(resp.content) if resp.status_code == 200 else None
+        if resp.status_code == 200:
+            res_txt = safe_decode(resp.content)
+            if res_txt:
+                save_raw_log("kokona", s3_key, res_txt)
+            return res_txt
+        return None
     except Exception as e: print(f"Kokona Error: {e}"); return None
 
 def format_raw_text(raw_text):
@@ -1069,15 +3706,85 @@ def format_raw_text(raw_text):
             if l: clean.append(l)
     return "\n".join(clean)
 
-def fetch_and_join_logs(log_sources, key=None, password=None, source=None):
-    """按用户给定顺序读取多个 Log，并用明确分隔线拼接。"""
-    sources = log_sources if isinstance(log_sources, list) and log_sources else [
+def _parse_time_str(s):
+    """尝试将各种标准/中文日期时间字符串解析为 Unix 秒级时间戳"""
+    if not s:
+        return None
+    s = str(s).strip()
+    s = re.sub(r'[年月]', '-', s)
+    s = re.sub(r'日', '', s)
+    formats = [
+        '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d',
+        '%Y/%m/%d %H:%M:%S', '%Y/%m/%d %H:%M', '%Y/%m/%d',
+        '%Y.%m.%d %H:%M:%S', '%Y.%m.%d %H:%M', '%Y.%m.%d',
+        '%Y-%m', '%Y/%m', '%Y.%m',
+    ]
+    for fmt in formats:
+        try:
+            return int(time.mktime(datetime.datetime.strptime(s, fmt).timetuple()))
+        except Exception:
+            pass
+    return None
+
+_DATE_PAT = re.compile(r'\b(20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)\b')
+
+def _detect_log_time_range(raw, text=None):
+    """从结构化对象或文本日志中识别起始与终止时间戳 (Unix秒级时间戳)"""
+    if isinstance(raw, dict):
+        items = raw.get('items', []) or raw.get('data', {}).get('items', [])
+        times = [int(it['time']) for it in items if it.get('time')]
+        if times:
+            return min(times), max(times)
+    content = text or (raw if isinstance(raw, str) else '')
+    if content:
+        # 1. 优先提取显式时间范围表达式（如 "2024-03-15~2024-03-20" 或 "2023-09~2023-10"）
+        m_range = re.findall(r'(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2})?日?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)', content)
+        if m_range:
+            ts_list = [_parse_time_str(m) for m in m_range]
+            ts_list = [t for t in ts_list if t is not None]
+            if ts_list:
+                return min(ts_list), max(ts_list)
+        # 2. 从多行文本采样中匹配
+        lines = content.splitlines()
+        found_times = []
+        sample_lines = lines[:300] + (lines[-300:] if len(lines) > 300 else [])
+        for l in sample_lines:
+            m = _DATE_PAT.search(l)
+            if m:
+                ts = _parse_time_str(m.group(1))
+                if ts:
+                    found_times.append(ts)
+        if found_times:
+            return min(found_times), max(found_times)
+    return 0, 0
+
+def fetch_and_join_logs(log_sources, key=None, password=None, source=None, identity_bindings=None):
+    """读取多个 Log，支持自动剔除重复 Log，按真实时间戳从早到晚严格正序排列，并用明确分隔线拼接。"""
+    raw_sources = log_sources if isinstance(log_sources, list) and log_sources else [
         {'key': key, 'password': password, 'source': source}
     ]
-    parts = []
+
+    # 1. 键值级自动去重
+    sources = []
+    seen_keys = set()
+    for item in raw_sources:
+        item_dict = item if isinstance(item, dict) else {'key': item}
+        item_k = str(item_dict.get('key') or '').strip()
+        item_s = str(item_dict.get('source') or '').strip().lower()
+        dedup_tag = f"{item_s}:{item_k.lower()}" if item_s else item_k.lower()
+        if not item_k:
+            continue
+        if dedup_tag in seen_keys:
+            print(f"[Log去重] 发现重复提交的 Log 源: {item_k}，已自动剔除")
+            continue
+        seen_keys.add(dedup_tag)
+        sources.append(item_dict)
+
+    fetched_pieces = []
     failures = []
+    seen_texts_hash = set()
+
     for index, item in enumerate(sources, 1):
-        item = item if isinstance(item, dict) else {'key': item}
         item_key = str(item.get('key') or '').strip()
         item_source = str(item.get('source') or '').strip().lower()
         item_password = item.get('password')
@@ -1092,15 +3799,61 @@ def fetch_and_join_logs(log_sources, key=None, password=None, source=None):
             if item_source == 'kokona': raw = fetch_kokona(item_key)
             elif item_source == 'trpgbot': raw = fetch_trpgbot(item_key)
             else: raw = fetch_weizaima(item_key, item_password)
-            text = format_raw_text(raw) if item_source != 'weizaima' else format_weizaima_text(raw)
-            if text.strip(): parts.append(f'【第{index}段 Log】\n{text.strip()}')
-            else: failures.append(f'第{index}段读取为空')
+            text = format_raw_text(raw) if item_source != 'weizaima' else format_weizaima_text(raw, identity_bindings)
+            if identity_bindings and text:
+                text = apply_identity_bindings(text, identity_bindings)
+            if text and text.strip():
+                # 内容级哈希去重
+                text_hash = hashlib.md5(text.strip().encode('utf-8')).hexdigest()
+                if text_hash in seen_texts_hash:
+                    print(f"[Log去重] 发现内容完全重复的 Log 段落 ({item_key})，已自动剔除")
+                    continue
+                seen_texts_hash.add(text_hash)
+
+                start_t, end_t = _detect_log_time_range(raw, text)
+                fetched_pieces.append({
+                    'key': item_key,
+                    'source': item_source,
+                    'raw': raw,
+                    'text': text.strip(),
+                    'start_t': start_t,
+                    'end_t': end_t,
+                    'orig_idx': index
+                })
+            else:
+                failures.append(f'第{index}段({item_key})读取为空')
         except Exception as exc:
-            failures.append(f'第{index}段读取失败: {exc}')
-    if not parts:
+            failures.append(f'第{index}段({item_key})读取失败: {exc}')
+
+    if not fetched_pieces:
         detail = '；'.join(failures)
         raise Exception(f'日志内容获取失败或为空{("：" + detail) if detail else ""}')
-    return '\n\n========== Log 顺序拼接分隔线 ==========\n\n'.join(parts), failures
+
+    # 按照时间戳从小到大（从早到晚）严格升序排列；无时间戳的置于末尾并保持原相对顺序
+    sorted_pieces = sorted(
+        fetched_pieces,
+        key=lambda p: (0, p['start_t'], p['orig_idx']) if p['start_t'] else (1, p['orig_idx'], p['orig_idx'])
+    )
+
+    parts = []
+    total = len(sorted_pieces)
+    for p_idx, p in enumerate(sorted_pieces, 1):
+        time_info = ""
+        if p['start_t'] and p['end_t']:
+            s_d = time.strftime('%Y-%m-%d', time.localtime(p['start_t']))
+            e_d = time.strftime('%Y-%m-%d', time.localtime(p['end_t']))
+            time_info = f" ({s_d} ~ {e_d})" if s_d != e_d else f" ({s_d})"
+        elif p['start_t']:
+            s_d = time.strftime('%Y-%m-%d', time.localtime(p['start_t']))
+            time_info = f" ({s_d})"
+
+        if total > 1:
+            header = f"【时间线第 {p_idx}/{total} 段: {p['key']}{time_info}】"
+        else:
+            header = f"【第 1 段 Log: {p['key']}{time_info}】"
+        parts.append(f"{header}\n{p['text']}")
+
+    return '\n\n========== Log 时间轴正序拼接分隔线 ==========\n\n'.join(parts), failures
 
 def _log_stat_name_key(value):
     text = str(value or '').strip().casefold()
@@ -1198,7 +3951,7 @@ def calculate_log_statistics(log_text):
     """从标准文本或聊天导出 Log 确定性计算玩家 RP、场外和骰点统计。"""
     header = re.compile(r'^\s*(.*?)\s*[（(]([1-9]\d{4,11})[）)]\s+\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s*$')
     normalized_header = re.compile(r'^\s*(.*?)\s*[（(]([1-9]\d{4,11})[）)]\s*[:：]\s*(.*)$')
-    angle_header = re.compile(r'^\s*<(?P<name>[^<>\r\n]+)>\s*[:：]\s*(?P<message>.*)$')
+    angle_header = re.compile(r'^\s*[<【\[(（](?P<name>[^>】\])）\r\n]{1,25})[>】\])）]\s*[:：]?\s*(?P<message>.*)$')
     chat_header = re.compile(
         r'^\s*(?P<name>.+?)\s*[:：]\s*'
         r'(?:(?:20\d{2})[-/.])?\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s*$'
@@ -1339,8 +4092,70 @@ def _clean_extracted_name(name):
     """清洗行头中提取的名字，剥离残留的时间戳、括号、SAN值等噪声。"""
     cleaned = re.sub(r'^\s*\[?(?:(?:20\d{2})[-/.])?\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\]?\s*', '', str(name or '')).strip()
     cleaned = re.sub(r'^\s*\[?\d{1,2}:\d{2}(?::\d{2})?\]?\s*', '', cleaned).strip()
-    cleaned = re.sub(r'\s+SAN\s*\d+.*$', '', cleaned, flags=re.IGNORECASE).strip()
-    return cleaned.strip('[]<>（()）:： ')
+    brackets = [('【', '】'), ('[', ']'), ('<', '>'), ('（', '）'), ('(', ')')]
+    cleaned = cleaned.strip(' :：')
+    for b_open, b_close in brackets:
+        if cleaned.startswith(b_open) and cleaned.endswith(b_close):
+            cleaned = cleaned[1:-1].strip(' :：')
+    return cleaned
+
+def extract_log_roster(log_text):
+    """
+    从跑团 Log 开篇提取 KP 与 PL/PC 阵容映射表。
+    支持：
+    KP：林一 / KP: 林一
+    PL：air(雅恩·加奈切) 镜离(卡修斯·米德尔顿) 亡言(卡罗姆·考特) 黎攸(佐伊·贝尔)
+    返回: (roster_map, identities)
+    """
+    first_lines = str(log_text or '').splitlines()[:150]
+    first_chunk = "\n".join(first_lines)
+
+    roster_map = {}
+    identities = {}
+
+    m_kp = re.search(r'(?i)(?:KP|主持人|守秘人|GM|DM)\s*[:：]\s*([^\r\n]+)', first_chunk)
+    if m_kp:
+        kp_raw = m_kp.group(1).strip()
+        kp_name = re.split(r'[\s/／,，]+', kp_raw)[0].strip()
+        if kp_name and kp_name.upper() not in ('PL', 'PC'):
+            kp_id = "roster:KP"
+            aliases = {'KP', 'kp', '守秘人', '主持人', kp_name}
+            identities[kp_id] = {
+                'role': 'KP',
+                'display': f"KP({kp_name})",
+                'player': kp_name,
+                'char_full': kp_name,
+                'char_short': kp_name,
+                'aliases': aliases
+            }
+            for a in aliases:
+                roster_map[_log_stat_name_key(a)] = kp_id
+
+    pl_matches = re.finditer(r'([^\s:：()（）<>{}\[\]]+)\s*[(（]([^\s:：()（）<>{}\[\]]+)[)）]', first_chunk)
+    for m in pl_matches:
+        p_name = m.group(1).strip()
+        c_full = m.group(2).strip()
+        # 严格排除纯数字（如 QQ 号）、时间戳、网址，避免将聊天行头误识别为出场人设
+        if re.fullmatch(r'\d+', p_name) or re.fullmatch(r'\d+', c_full):
+            continue
+        if re.search(r'^\d{1,2}:\d{2}', c_full) or c_full.startswith(('http', 'https')):
+            continue
+        c_short = re.split(r'[·.・\s-]', c_full)[0] if re.search(r'[·.・\s-]', c_full) else c_full
+        if p_name.upper() not in ('KP', 'PL', 'PC', 'GM', 'DM') and len(p_name) <= 15 and len(c_full) <= 30:
+            pl_id = f"roster:{p_name}"
+            aliases = {p_name, c_full, c_short}
+            identities[pl_id] = {
+                'role': 'PL',
+                'display': f"{p_name}({c_full})",
+                'player': p_name,
+                'char_full': c_full,
+                'char_short': c_short,
+                'aliases': aliases
+            }
+            for a in aliases:
+                roster_map[_log_stat_name_key(a)] = pl_id
+
+    return roster_map, identities
 
 def match_target_identity(all_names_with_qq, target_user, qq_counts=None):
     """
@@ -1409,21 +4224,59 @@ def match_target_identity(all_names_with_qq, target_user, qq_counts=None):
     # 5. 未能直接匹配
     return None, target, {target}
 
-def extract_player_profile_and_stats(log_text, target_user):
+def parse_target_identifiers(target_input):
+    """解析并提取目标用户标识列表，支持单个/列表、逗号、顿号、斜杠、空格分隔。自动过滤系统生成的OpenQQ等通道内部ID。"""
+    if not target_input:
+        return []
+    if isinstance(target_input, (list, tuple, set)):
+        items = []
+        for x in target_input:
+            items.extend(parse_target_identifiers(x))
+        return items
+
+    s = str(target_input).strip()
+    s = re.sub(r'^(?:QQ[:：])?', '', s, flags=re.IGNORECASE).strip()
+    if not s:
+        return []
+
+    parts = re.split(r'[,，;；/、|\n]+', s)
+    result = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        subparts = [sp.strip() for sp in p.split() if sp.strip()]
+        target_candidates = subparts if len(subparts) > 1 else [p]
+        for item in target_candidates:
+            clean = re.sub(r'^(?:QQ[:：])?', '', item, flags=re.IGNORECASE).strip()
+            if re.match(r'^OpenQQ(?::|CH:)[0-9a-zA-Z]+$', clean, re.IGNORECASE):
+                continue
+            if clean and clean not in result:
+                result.append(clean)
+    return result
+
+def extract_player_profile_and_stats(log_text, target_user, user_name=None):
     """
-    专门针对目标用户（支持 QQ 号或角色昵称/前缀/后缀/模糊搜索）
+    专门针对目标用户（支持 QQ 号、玩家名、角色昵称/前缀/后缀/模糊搜索，支持多标识联合匹配及成品剧本Log对号）
     提取其在 Log 中的发言、别名、RP/OOC统计及骰点数据。
     """
     records = []
     current = None
     all_qq_names = {}
     qq_counts = {}
+    name_counts = {}
+
+    roster_map, identities = extract_log_roster(log_text)
 
     header_patterns = [
         re.compile(r'^\s*(.*?)\s*[（(<]([1-9]\d{4,11})[）)>]\s+(?:(?:20\d{2})[-/.])?\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*$'),
         re.compile(r'^\s*(.*?)\s*[（(<]([1-9]\d{4,11})[）)>]\s*[:：]\s*(.*)$'),
     ]
     chat_pattern = re.compile(r'^\s*(.*?)\s*[:：]\s*(?:(?:20\d{2})[-/.])?\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*$')
+    bracket_head = re.compile(r'^\s*[<【\[(（](?P<name>[^>】\])）\r\n]{1,25})[>】\])）]\s*[:：]?\s*(?P<msg>.*)$')
+    colon_head = re.compile(r'^\s*(?P<name>KP|PL|DM|GM|守密人|调查员|[^\s:：]{2,15})\s*[:：]\s*(?P<msg>.*)$')
+
+    noise_names = {'http', 'https', 'file', '微灾码', 'STONY GROUNDS', '材料一', '材料二', '材料三', '材料四', '附录'}
 
     for raw_line in str(log_text or '').splitlines():
         line_str = raw_line.strip()
@@ -1439,6 +4292,7 @@ def extract_player_profile_and_stats(log_text, target_user):
                 name = _clean_extracted_name(before) or f"用户({qq})"
                 all_qq_names.setdefault(qq, set()).add(name)
                 qq_counts[qq] = qq_counts.get(qq, 0) + 1
+                name_counts[name] = name_counts.get(name, 0) + 1
                 current = {'name': name, 'qq': qq, 'lines': [content] if content else []}
                 is_head = True
                 break
@@ -1455,6 +4309,7 @@ def extract_player_profile_and_stats(log_text, target_user):
                     name = _clean_extracted_name(before) or f"用户({qq})"
                     all_qq_names.setdefault(qq, set()).add(name)
                     qq_counts[qq] = qq_counts.get(qq, 0) + 1
+                    name_counts[name] = name_counts.get(name, 0) + 1
                     content = re.sub(r'^[:：]\s*', '', after).strip()
                     if current: records.append(current)
                     current = {'name': name, 'qq': qq, 'lines': [content] if content else []}
@@ -1465,8 +4320,33 @@ def extract_player_profile_and_stats(log_text, target_user):
             if mc:
                 if current: records.append(current)
                 c_name = _clean_extracted_name(mc.group(1).strip())
+                name_counts[c_name] = name_counts.get(c_name, 0) + 1
                 current = {'name': c_name, 'qq': None, 'lines': []}
                 is_head = True
+
+        if not is_head:
+            mb = bracket_head.match(line_str)
+            if mb:
+                b_raw = mb.group('name').strip()
+                if not re.match(r'^\d+$', b_raw) and b_raw not in noise_names:
+                    if current: records.append(current)
+                    c_name = _clean_extracted_name(b_raw)
+                    msg = mb.group('msg').strip()
+                    name_counts[c_name] = name_counts.get(c_name, 0) + 1
+                    current = {'name': c_name, 'qq': None, 'lines': [msg] if msg else []}
+                    is_head = True
+
+        if not is_head:
+            mcol = colon_head.match(line_str)
+            if mcol:
+                col_raw = mcol.group('name').strip()
+                if col_raw not in noise_names and not col_raw.startswith(('http', 'ftp')):
+                    if current: records.append(current)
+                    c_name = _clean_extracted_name(col_raw)
+                    msg = mcol.group('msg').strip()
+                    name_counts[c_name] = name_counts.get(c_name, 0) + 1
+                    current = {'name': c_name, 'qq': None, 'lines': [msg] if msg else []}
+                    is_head = True
 
         if not is_head and current is not None:
             current['lines'].append(raw_line.rstrip())
@@ -1474,14 +4354,127 @@ def extract_player_profile_and_stats(log_text, target_user):
     if current:
         records.append(current)
 
-    # 目标定位匹配
-    matched_qq, display_name, matched_aliases = match_target_identity(all_qq_names, target_user, qq_counts)
+    is_finished_log = (len(all_qq_names) == 0 and len(records) > 0)
 
-    # 筛选目标发言
+    # 规整所有目标项（支持空格、全角/半角逗号、顿号、斜杠等分隔的多目标）
+    target_list = parse_target_identifiers(target_user)
+    if not target_list:
+        raw_s = str(target_user or '').strip()
+        clean_raw = re.sub(r'^(?:QQ[:：])?', '', raw_s, flags=re.IGNORECASE).strip()
+        if clean_raw and not re.match(r'^OpenQQ(?::|CH:)[0-9a-zA-Z]+$', clean_raw, re.IGNORECASE):
+            target_list = [clean_raw]
+
+    explicit_target_qqs = set()
+    internal_target_qqs = set()
+    matched_aliases = set()
+    display_names = []
+
+    for item in target_list:
+        t = re.sub(r'^(?:QQ[:：])?', '', str(item).strip(), flags=re.IGNORECASE).strip()
+        clean_qq = re.sub(r'\D', '', t)
+        is_pure_qq = bool(clean_qq and len(clean_qq) in range(5, 13) and clean_qq == t)
+
+        if is_pure_qq:
+            explicit_target_qqs.add(clean_qq)
+            internal_target_qqs.add(clean_qq)
+            if clean_qq in all_qq_names:
+                names = all_qq_names[clean_qq]
+                matched_aliases.update(names)
+                disp = sorted(list(names))[0] if names else clean_qq
+                if disp not in display_names: display_names.append(disp)
+            elif is_finished_log and user_name:
+                u_key = _log_stat_name_key(user_name)
+                if u_key in roster_map:
+                    ident = identities[roster_map[u_key]]
+                    matched_aliases.update(ident['aliases'])
+                    if ident['display'] not in display_names: display_names.append(ident['display'])
+                else:
+                    for n in name_counts:
+                        nk = _log_stat_name_key(n)
+                        if nk == u_key or u_key in nk or nk in u_key:
+                            matched_aliases.add(n)
+                            if n not in display_names: display_names.append(n)
+                            break
+            else:
+                matched_aliases.add(clean_qq)
+                if clean_qq not in display_names: display_names.append(clean_qq)
+        else:
+            t_key = _log_stat_name_key(t)
+            found_this = False
+            if t_key:
+                # 1. 优先检查 roster_map (剧本出场名单表中的映射)
+                if t_key in roster_map:
+                    ident = identities[roster_map[t_key]]
+                    matched_aliases.update(ident['aliases'])
+                    if ident['display'] not in display_names: display_names.append(ident['display'])
+                    found_this = True
+                else:
+                    for k, ident_id in roster_map.items():
+                        if t_key in k or k in t_key:
+                            ident = identities[ident_id]
+                            matched_aliases.update(ident['aliases'])
+                            if ident['display'] not in display_names: display_names.append(ident['display'])
+                            found_this = True
+                            break
+
+                # 2. 检查 all_qq_names (带 QQ 的传统日志)
+                if not found_this and all_qq_names:
+                    m_q, m_d, m_a = match_target_identity(all_qq_names, t, qq_counts)
+                    if m_q:
+                        internal_target_qqs.add(m_q)
+                        matched_aliases.update(m_a)
+                        clean_disp = m_d if m_d and not re.search(r'^\d+$|^用户\(\d+\)$', m_d) else t
+                        if clean_disp not in display_names: display_names.append(clean_disp)
+                        found_this = True
+                    elif m_a != {t}:
+                        matched_aliases.update(m_a)
+                        clean_disp = m_d if m_d and not re.search(r'^\d+$|^用户\(\d+\)$', m_d) else t
+                        if clean_disp not in display_names: display_names.append(clean_disp)
+                        found_this = True
+
+                # 3. 检查 name_counts (成品日志发言人频次表)
+                if not found_this and name_counts:
+                    for n in sorted(name_counts.keys(), key=lambda x: name_counts[x], reverse=True):
+                        nk = _log_stat_name_key(n)
+                        if nk == t_key or t_key in nk or nk in t_key:
+                            matched_aliases.add(n)
+                            if n not in display_names: display_names.append(n)
+                            found_this = True
+                            break
+
+            if not found_this:
+                matched_aliases.add(t)
+                if t not in display_names: display_names.append(t)
+
+    # 综合 display_name 与 primary clean_target_qq
+    primary_qq = sorted(list(explicit_target_qqs))[0] if explicit_target_qqs else None
+    if display_names:
+        uniq_names = []
+        seen_keys = set()
+        brackets = [('【', '】'), ('[', ']'), ('<', '>'), ('（', '）'), ('(', ')')]
+        for d in display_names:
+            clean_d = re.sub(r'[\(（](?:QQ[:：])?\d{5,12}[\)）]', '', str(d)).strip(' :：')
+            for b_open, b_close in brackets:
+                if clean_d.startswith(b_open) and clean_d.endswith(b_close):
+                    clean_d = clean_d[1:-1].strip(' :：')
+            if not clean_d or clean_d in explicit_target_qqs or clean_d in internal_target_qqs or re.fullmatch(r'\d+', clean_d) or clean_d in ('用户', '玩家') or str(d).startswith(('用户(', '用户（')):
+                continue
+            k = _log_stat_name_key(clean_d)
+            if k and k not in seen_keys:
+                seen_keys.add(k)
+                uniq_names.append(clean_d)
+        if uniq_names:
+            display_name = " / ".join(uniq_names)
+        else:
+            display_name = primary_qq or " / ".join(target_list)
+    else:
+        display_name = primary_qq or " / ".join(target_list)
+
+    # 筛选目标发言（只要命中了任一内部目标 QQ 或目标别名即合并聚合）
     target_name_keys = {_log_stat_name_key(a) for a in matched_aliases if a}
     target_records = []
     for r in records:
-        if matched_qq and r.get('qq') == matched_qq:
+        if r.get('qq') and r.get('qq') in internal_target_qqs:
             target_records.append(r)
         elif r.get('name') and _log_stat_name_key(r.get('name')) in target_name_keys:
             target_records.append(r)
@@ -1518,20 +4511,41 @@ def extract_player_profile_and_stats(log_text, target_user):
             kp_score += 1
 
     actor_pattern = re.compile(r'(?:<([^>]+)>|^\s*\[([^\]]+)\])')
+    dice_bot_names = {'喵喵', '骰娘', 'seal', 'sealdice', 'bot', '机器人', 'dice'}
     all_target_name_keys = {_log_stat_name_key(a) for a in aliases if a}
 
+    pending_target = False
     for r in records:
         raw_msg = '\n'.join(r['lines'])
+        r_name = r.get('name') or ''
+        r_name_key = _log_stat_name_key(r_name)
+        is_dice_bot = r_name_key in dice_bot_names or any(db in r_name_key for db in dice_bot_names)
+        is_target_record = bool((r.get('qq') and r.get('qq') in internal_target_qqs) or (not is_dice_bot and r_name_key in all_target_name_keys))
+
+        command_count = _roll_command_count(raw_msg)
+        if command_count and is_target_record:
+            pending_target = True
+            continue
+
         extracted = _extract_check_rolls(raw_msg)
         if not extracted:
             continue
+
         actor_match = actor_pattern.search(raw_msg)
         actor = next((g for g in actor_match.groups() if g), '') if actor_match else ''
         clean_actor = _clean_extracted_name(actor)
-        if clean_actor and _log_stat_name_key(clean_actor) in all_target_name_keys:
+        actor_key = _log_stat_name_key(clean_actor)
+
+        is_actor_target = bool(actor_key and (actor_key in all_target_name_keys or any(k in actor_key or actor_key in k for k in all_target_name_keys)))
+        if not is_actor_target and is_dice_bot:
+            raw_msg_key = _log_stat_name_key(raw_msg)
+            is_actor_target = any(k in raw_msg_key for k in all_target_name_keys if len(k) >= 2)
+
+        if is_actor_target or (pending_target and is_dice_bot) or is_target_record:
             all_rolls.extend(extracted)
-        elif matched_qq and r.get('qq') == matched_qq:
-            all_rolls.extend(extracted)
+            pending_target = False
+        else:
+            pending_target = False
 
     rolls_count = len(all_rolls)
     successes = sum(1 for roll in all_rolls if roll.get('success'))
@@ -1542,21 +4556,36 @@ def extract_player_profile_and_stats(log_text, target_user):
     results = [r['result'] for r in all_rolls]
     roll_avg = round(sum(results) / rolls_count, 1) if rolls_count else 0.0
 
-    # 兜底启发式 KP 判定（仅用于大模型未显式返回标签时的 fallback 兜底）
     is_kp_fallback = kp_score >= 8 or (kp_score >= 4 and rolls_count == 0 and total_chars > 2000)
 
-    top_characters = sorted(
-        [{'qq': q, 'names': list(names), 'count': qq_counts.get(q, 0)} for q, names in all_qq_names.items()],
-        key=lambda x: x['count'], reverse=True
-    )[:10]
+    if all_qq_names:
+        top_characters = sorted(
+            [{'qq': q, 'names': list(names), 'count': qq_counts.get(q, 0)} for q, names in all_qq_names.items()],
+            key=lambda x: x['count'], reverse=True
+        )[:10]
+    elif identities:
+        top_characters = sorted(
+            [{'qq': None, 'names': [ident['display']], 'count': sum(name_counts.get(a, 0) for a in ident['aliases'])} for ident in identities.values()],
+            key=lambda x: x['count'], reverse=True
+        )
+    else:
+        top_characters = [
+            {'qq': None, 'names': [n], 'count': c}
+            for n, c in sorted(name_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+            if n not in dice_bot_names and n not in noise_names
+        ]
 
     return {
         'target_user': str(target_user),
-        'clean_target_qq': matched_qq,
+        'clean_target_qq': primary_qq,
+        'explicit_target_qqs': sorted(list(explicit_target_qqs)),
+        'target_qqs': sorted(list(explicit_target_qqs)),
+        'internal_target_qqs': sorted(list(internal_target_qqs)),
         'display_name': display_name or str(target_user),
-        'found': bool(str(target_user or '').strip() and (message_count > 0 or rolls_count > 0)),
+        'found': bool(target_list and (message_count > 0 or rolls_count > 0)),
         'aliases': sorted(list(aliases)),
         'is_kp': is_kp_fallback,
+        'is_finished_log': is_finished_log,
         'message_count': message_count,
         'total_chars': total_chars,
         'rp_chars': rp_chars,
@@ -1575,21 +4604,49 @@ def extract_player_profile_and_stats(log_text, target_user):
 def build_unmatched_target_error_message(target_user, player_stats):
     """当无法在日志中匹配到目标人物或QQ号时，构建详细友好的错误提示信息。"""
     target = str(target_user or '').strip()
-    clean_qq = re.sub(r'\D', '', target)
-    is_pure_qq = bool(clean_qq and len(clean_qq) in range(5, 13))
+    clean_qq = re.sub(r'^(?:QQ[:：])?', '', target, flags=re.IGNORECASE).strip()
+    is_pure_qq = bool(re.fullmatch(r'\d{5,12}', clean_qq))
+    is_finished_log = player_stats.get('is_finished_log', False)
+    top_chars = player_stats.get('top_characters', [])
+    all_qqs = player_stats.get('all_detected_qqs', {})
 
     msg_lines = []
+    if is_finished_log:
+        msg_lines.append("【成品跑团日志风格分析未命中提示】")
+        if not target or is_pure_qq:
+            msg_lines.append(f"当前 Log 为已整理的剧本/小说式成品日志（未包含真实 QQ 号）。未能通过 QQ 号【{target or '当前账号'}】自动对号。")
+        else:
+            msg_lines.append(f"未在当前成品 Log 中匹配到角色或玩家【{target}】的发言或检定。")
+        msg_lines.append("已终止任务以避免大模型脱离角色产生幻觉。")
+
+        if top_chars:
+            msg_lines.append("\n当前日志中识别到的出场跑团成员如下：")
+            for item in top_chars:
+                disp = '/'.join(item.get('names', []))
+                cnt = f" ({item.get('count')}条发言)" if item.get('count') else ""
+                msg_lines.append(f"· {disp}{cnt}")
+        
+        msg_lines.append("\n【建议指令】：")
+        msg_lines.append("请使用上述识别到的角色名或玩家名重试，例如：")
+        if top_chars:
+            first_name = top_chars[0]['names'][0].split('(')[0]
+            msg_lines.append(f"- .风格 {first_name}")
+            if len(top_chars) > 1:
+                second_name = top_chars[1]['names'][0].split('(')[0]
+                msg_lines.append(f"- .风格 {second_name}")
+        else:
+            msg_lines.append("- .风格 <角色名>")
+        return '\n'.join(msg_lines)
+
     msg_lines.append("【风格分析目标未命中提示】")
-    if not target:
-        msg_lines.append("未指定分析目标，且当前发送者未在日志中参与发言或掷骰检定。")
+    if not target or re.match(r'^OpenQQ(?::|CH:)[0-9a-zA-Z]+$', target, re.IGNORECASE):
+        msg_lines.append("未指定有效分析目标，且未能自动匹配到您在日志中的发言。")
+        msg_lines.append("💡 提示：若使用的是 QQ 官方 Bot，请先发送【.QQ绑定 <原QQ号>】绑定 QQ，或直接在指令后指定角色名：.风格 <角色名>")
     elif is_pure_qq:
         msg_lines.append(f"未在当前 Log 日志中检索到 QQ 账号【{clean_qq}】的任何发言或掷骰检定记录。")
     else:
         msg_lines.append(f"未在当前 Log 日志中匹配到角色或昵称【{target}】的任何发言或掷骰检定记录。")
     msg_lines.append("无法交由大模型进行客观分析，已终止任务以避免产生虚假分析与幻觉。")
-
-    top_chars = player_stats.get('top_characters', [])
-    all_qqs = player_stats.get('all_detected_qqs', {})
 
     if top_chars:
         msg_lines.append("\n当前日志中检测到的主要活跃角色如下（供参考）：")
@@ -1613,9 +4670,11 @@ def build_unmatched_target_error_message(target_user, player_stats):
 
     return '\n'.join(msg_lines)
 
-def format_target_player_stats_for_prompt(player_stats, target_user):
+def format_target_player_stats_for_prompt(player_stats, target_user, timeline_str=""):
     """将目标用户的确定性统计格式化为系统提示词中的只读参考数据。"""
     lines = ["\n\n【目标分析对象确定性参考数据（只读线索，最终身份请由你根据剧情细节独立研判）】："]
+    if timeline_str:
+        lines.append(f"- 战役时间轴说明：{timeline_str}")
     if not player_stats.get('found'):
         lines.append(f"- 目标标识：{target_user}")
         lines.append("- 注意：在当前 Log 中未直接检测到该对象的专属行头。")
@@ -1627,9 +4686,11 @@ def format_target_player_stats_for_prompt(player_stats, target_user):
         return '\n'.join(lines)
 
     target_qq = player_stats.get('clean_target_qq')
+    target_qqs = player_stats.get('target_qqs') or ([target_qq] if target_qq else [])
+    qq_str = "/".join(target_qqs) if target_qqs else ""
     disp = player_stats.get('display_name') or target_user
     aliases = player_stats.get('aliases', [])
-    lines.append(f"- 目标对象：{disp}" + (f" (QQ: {target_qq})" if target_qq else ""))
+    lines.append(f"- 目标对象：{disp}" + (f" (QQ: {qq_str})" if qq_str else ""))
     lines.append(f"- 角色/使用昵称：{', '.join(aliases) if aliases else disp}")
     lines.append(f"- 后端统计线索：检测到该角色发言 {player_stats.get('message_count', 0)} 条，总计 {player_stats.get('total_chars', 0)} 字（RP描写约 {player_stats.get('rp_chars', 0)} 字，场外约 {player_stats.get('ooc_chars', 0)} 字）")
     if player_stats.get('rolls_count'):
@@ -1645,7 +4706,14 @@ def build_player_focused_log_text(log_text, target_qq=None, target_aliases=None,
     if not log_text or len(log_text) <= max_chars:
         return log_text
 
-    clean_qq = re.sub(r'\D', '', str(target_qq or '')).strip()
+    clean_qqs = set()
+    if isinstance(target_qq, (set, list, tuple)):
+        clean_qqs = {re.sub(r'\D', '', str(q)).strip() for q in target_qq if str(q).strip()}
+    else:
+        raw_qq_str = str(target_qq or '').strip()
+        clean_qqs = {re.sub(r'\D', '', q).strip() for q in re.split(r'[,，;；/、|\s]+', raw_qq_str) if re.sub(r'\D', '', q).strip()}
+    clean_qqs.discard('')
+
     aliases = set(target_aliases or [])
     alias_keys = {_log_stat_name_key(a) for a in aliases if a}
 
@@ -1660,6 +4728,8 @@ def build_player_focused_log_text(log_text, target_qq=None, target_aliases=None,
         re.compile(r'^\s*(.*?)\s*[（(<]([1-9]\d{4,11})[）)>]\s*[:：]\s*(.*)$'),
     ]
     chat_pattern = re.compile(r'^\s*(.*?)\s*[:：]\s*(?:(?:20\d{2})[-/.])?\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*$')
+    bracket_head = re.compile(r'^\s*[<【\[(（](?P<name>[^>】\])）\r\n]{1,25})[>】\])）]\s*[:：]?\s*(?P<msg>.*)$')
+    colon_head = re.compile(r'^\s*(?P<name>KP|PL|DM|GM|守密人|调查员|[^\s:：]{2,15})\s*[:：]\s*(?P<msg>.*)$')
 
     for line in lines:
         line_str = line.strip()
@@ -1700,6 +4770,30 @@ def build_player_focused_log_text(log_text, target_qq=None, target_aliases=None,
                 is_head = True
 
         if not is_head:
+            mb = bracket_head.match(line_str)
+            if mb:
+                b_raw = mb.group('name').strip()
+                if not re.match(r'^\d+$', b_raw) and b_raw not in ('http', 'https', 'file', '微灾码', 'STONY GROUNDS'):
+                    if current_block:
+                        blocks.append({'qq': current_qq, 'name': current_name, 'text': '\n'.join(current_block)})
+                    current_name = _clean_extracted_name(b_raw)
+                    current_qq = ""
+                    current_block = [line]
+                    is_head = True
+
+        if not is_head:
+            mcol = colon_head.match(line_str)
+            if mcol:
+                col_raw = mcol.group('name').strip()
+                if col_raw not in ('http', 'https', 'file', '微灾码', 'STONY GROUNDS'):
+                    if current_block:
+                        blocks.append({'qq': current_qq, 'name': current_name, 'text': '\n'.join(current_block)})
+                    current_name = _clean_extracted_name(col_raw)
+                    current_qq = ""
+                    current_block = [line]
+                    is_head = True
+
+        if not is_head:
             if current_block:
                 current_block.append(line)
             else:
@@ -1733,7 +4827,7 @@ def build_player_focused_log_text(log_text, target_qq=None, target_aliases=None,
 
     for i, b in enumerate(blocks):
         is_target = False
-        if clean_qq and b.get('qq') == clean_qq:
+        if clean_qqs and b.get('qq') in clean_qqs:
             is_target = True
         elif b.get('name') and _log_stat_name_key(b.get('name')) in alias_keys:
             is_target = True
@@ -1801,34 +4895,98 @@ series:
 """
     return custom + compatibility + format_log_statistics_for_prompt(calculated_statistics)
 
+
+def build_custom_player_style_prompt(custom_prompt, player_stats, target_user, calculated_statistics=None, requested_theme='default'):
+    """为指定玩家/KP风格分析的自定义提示词补齐目标对号约束、身份研判与图表规则。
+
+    支持与常规 logai 分析一致的 logai-chart 图表支持；
+    若自定义配置未要求图表，则严令大模型切勿输出图表块，避免误加图表。
+    """
+    custom = str(custom_prompt or '').strip()
+    target_display = player_stats.get('display_name') or target_user or '目标角色'
+    target_qq = player_stats.get('clean_target_qq') or ''
+    target_qqs = player_stats.get('target_qqs') or ([target_qq] if target_qq else [])
+    qq_str = "/".join(target_qqs) if target_qqs else target_qq
+    target_badge = f"{target_display} (QQ:{qq_str})" if qq_str else target_display
+
+    theme_names = {'classic': '经典', 'cyberpunk': '赛博', 'historical': '历史', 'cthulhu': '克苏鲁', 'wasteland': '废土', 'anime': '二次元', 'terminal': '终端', 'default': ''}
+    theme_label = theme_names.get(requested_theme, requested_theme if requested_theme != 'default' else '')
+    if not theme_label:
+        theme_match = re.search(r'【主题[：:]\s*(经典|赛博|历史|克苏鲁|废土|二次元|终端)', custom)
+        theme_label = theme_match.group(1) if theme_match else ''
+    theme_hint = ''
+    if theme_label:
+        theme_hint = f'【主题顺序】：请将【主题：{theme_label}】作为回复第一行；第二行输出身份判定，随后输出【分页符】。'
+    else:
+        theme_hint = '【主题顺序】：如果需要主题标签，必须放在回复第一行。'
+
+    compatibility = f"""
+
+【后端风格分析与图表兼容协议（优先执行）】：
+1. 本次分析为【针对特定对象的跑团/带团风格深度分析】，对号分析的核心目标为：【{target_badge}】。
+2. 下方的自定义要求负责具体的分析角度、切入点、打分标准与语言文风；你必须结合日志中该目标的具体发言、关键决策、RP描写与检定互动进行针对性分析，切勿混淆或分析其他玩家。
+3. 【图表输出规则（与常规分析一致，避免误加图表）】：
+   - 【仅当下方自定义要求中明确提及需要图表/雷达图/柱状图/能力图/打分图时】，才可输出如下 Markdown fenced 图表块（数值范围 0-100，坐标与数值一一对应；1-2项自动画柱状图，3-10项画雷达图）：
+```logai-chart
+type: radar
+title: 综合风格能力雷达图
+axes: 维度一 | 维度二 | 维度三 | 维度四 | 维度五 | 维度六
+series:
+综合评价: 80 | 75 | 90 | 65 | 85 | 70
+```
+   - 【重要防误加约束】：若下方的自定义要求中【没有明确要求图表/雷达图】，严禁输出任何 logai-chart 代码块，绝对不要自行添油加醋画图，保持纯文本卡片排版，避免在未要求的情况下误加入图表！
+4. 【分页格式规范】：每个主要分析板块之间，必须使用单独一行的“【分页符】”进行分隔，以便渲染为优雅的多页长图卡片；请勿把图表块置于表格内部。
+5. 【身份终审标签】：请在回复最开头的独立行中输出【身份：PL】或【身份：KP】（若二者兼有可写【身份：双重】），以便后端动态生成精准的报告标题。
+{theme_hint}
+"""
+    target_stats_text = format_target_player_stats_for_prompt(player_stats, target_user)
+    return custom + compatibility + target_stats_text
+
+
 # --- 核心处理任务 ---
-def background_process(job_id, key, password, source, is_pro=False, is_kind=False, mode='analyze', persona="", custom_prompt="", theme='default', is_ds=False, group_key="", backup_model="", user_key="", user_name="", custom_name="", token_module="", log_sources=None, target_qq=""):
+def background_process(job_id, key, password, source, is_pro=False, is_kind=False, mode='analyze', persona="", custom_prompt="", theme='default', is_ds=False, group_key="", backup_model="", user_key="", user_name="", custom_name="", token_module="", log_sources=None, target_qq="", save_archive=True, custom_timeline="", identity_bindings=None, specified_identity=None):
     """后台线程：执行 Log 下载、分析、绘图"""
     print(f"[{job_id}] 开始处理Log... Source: {source}, Mode: {mode}")
     try:
+        # 获取连接池 Session
+        session = get_session()
+        
+        # 0. 优先拉取文本内容
+        log_sources_list = log_sources if isinstance(log_sources, list) and log_sources else [
+            {'key': key, 'password': password, 'source': source}
+        ]
+        log_text, failures = fetch_and_join_logs(log_sources_list, key, password, source, identity_bindings=identity_bindings)
+        if failures:
+            print(f"[{job_id}] 部分网络链接拉取异常: {'；'.join(failures)}")
+        if identity_bindings and log_text:
+            log_text = apply_identity_bindings(log_text, identity_bindings)
+        if not log_text or not log_text.strip():
+            raise Exception("无法从提供的网络 Log 链接中获取有效文本。")
+        first_key = log_sources_list[0].get('key', 'multi_logs')
+        source_signature = hashlib.md5("_".join([str(s.get('key','')) for s in log_sources_list]).encode('utf-8')).hexdigest()
+        curr_start_t, curr_end_t = _detect_log_time_range(None, log_text)
+        if custom_timeline:
+            c_s, c_e = _detect_log_time_range(None, custom_timeline)
+            if c_s:
+                curr_start_t = c_s
+                curr_end_t = c_e or c_s
+
         # ================= 1. 尝试触发省流缓存 =================
         hash_key = None
         if not is_pro:
-            # 只有普通模式参与缓存，确保同一个Log和同样的提示配置拥有唯一签名
-            # v2：角色卡改为 QQ 归属匹配，避免继续复用旧版姓名子串误命中的图片缓存。
-            source_signature = json.dumps(log_sources or [], ensure_ascii=False, sort_keys=True, default=str)
-            hash_str = f"url_log_stats_v5_{key}_{source_signature}_{mode}_{is_kind}_{persona}_{custom_prompt}_{theme}_{is_ds}_{backup_model}_{target_qq}"
+            # 基础缓存 Key (不包含人设、自定义提示词，作为无个性化时的默认结果)
+            hash_str = f"url_log_stats_v5_{key}_{source_signature}_{mode}_{is_kind}_{persona}_{custom_prompt}_{theme}_{is_ds}_{backup_model}_{target_qq}_{custom_timeline}"
             hash_key = hashlib.md5(hash_str.encode('utf-8')).hexdigest()
+            
             cached_images = get_daily_cache(hash_key)
             if cached_images:
-                print(f"[{job_id}] 命中今日缓存库！省流模式启动，秒回历史图片。")
+                print(f"[{job_id}] 命中今日多源内容缓存！省流模式启动，秒回历史图片。")
                 JOB_CACHE[job_id]['status'] = 'done'
                 JOB_CACHE[job_id]['images'] = cached_images
                 return
-        # ========================================================
-        log_text, source_failures = fetch_and_join_logs(log_sources, key, password, source)
-        if source_failures:
-            print(f"[{job_id}] 部分 Log 读取失败（已跳过）: {'；'.join(source_failures)}")
-        
-        if not log_text:
-            raise Exception("日志内容获取失败或为空")
+        # ======================================================
 
-        # 智能截断防爆 Token
+        # 2. 预处理文本
         if len(log_text) > MAX_AI_CHARS:
             part = int(MAX_AI_CHARS * 0.4)
             mid = log_text[part:-part].split('\n')
@@ -1844,7 +5002,8 @@ def background_process(job_id, key, password, source, is_pro=False, is_kind=Fals
         
         if is_player_style:
             target_user_input = str(target_qq or '').strip()
-            player_stats = extract_player_profile_and_stats(log_text, target_user_input)
+            user_name_input = str(user_name or req_data.get('user_name') or '').strip()
+            player_stats = extract_player_profile_and_stats(log_text, target_user_input, user_name=user_name_input)
             
             # 【核心拦截】：未匹配到目标人物/QQ时直接报错返回，禁止交由 LLM 产生幻觉
             if not player_stats.get('found'):
@@ -1857,15 +5016,48 @@ def background_process(job_id, key, password, source, is_pro=False, is_kind=Fals
                 return
 
             clean_target_qq = player_stats.get('clean_target_qq') or ""
+            target_qqs = player_stats.get('target_qqs') or ([clean_target_qq] if clean_target_qq else [])
+            target_qqs_str = "/".join(target_qqs) if target_qqs else clean_target_qq
             target_display_name = player_stats.get('display_name') or target_user_input or "玩家"
+
+            if custom_timeline:
+                timeline_str = custom_timeline
+            else:
+                m_dates = re.findall(r'\b(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2})?日?)\b', (log_text[:3000] + log_text[-3000:]))
+                if m_dates:
+                    norm_dates = sorted([d.replace('/', '-').replace('.', '-').replace('年', '-').replace('月', '-').replace('日', '') for d in m_dates])
+                    timeline_str = f"{norm_dates[0]} ~ {norm_dates[-1]}" if norm_dates[0] != norm_dates[-1] else norm_dates[0]
+                else:
+                    timeline_str = "无指定时间轴 (依日志顺序)"
+
             report_title = f"TRPG 风格分析报告 ({target_display_name})"
             if custom_prompt:
-                system_prompt = build_custom_log_prompt(custom_prompt, calculated_statistics, theme)
-                report_title = "TRPG 自定义分析报告"
+                system_prompt = build_custom_player_style_prompt(custom_prompt, player_stats, target_user_input, calculated_statistics, theme)
             else:
                 system_prompt = PLAYER_STYLE_SYSTEM_PROMPT
-                system_prompt += format_target_player_stats_for_prompt(player_stats, target_user_input)
-            log_text_ai = build_player_focused_log_text(log_text, target_qq=clean_target_qq, target_aliases=player_stats.get('aliases'), max_chars=MAX_AI_CHARS)
+                system_prompt += format_target_player_stats_for_prompt(player_stats, target_user_input, timeline_str=timeline_str)
+
+            # 检索历史相邻档案并注入系统提示词 (前2次 + 后1次)
+            if specified_identity:
+                norm_sp = str(specified_identity).strip().upper()
+                target_identity = "KP" if norm_sp in ("KP", "DM", "主持", "主持人", "守秘人") else ("PL" if norm_sp in ("PL", "玩家") else ("KP" if player_stats.get('is_kp') else "PL"))
+            else:
+                target_identity = "KP" if player_stats.get('is_kp') else "PL"
+            target_for_history = f"{target_display_name} {clean_target_qq}".strip() if clean_target_qq else (target_display_name or target_user_input)
+            _, _, hist_prompt_text = get_adjacent_historical_records(
+                target_user=target_for_history,
+                curr_start_t=curr_start_t,
+                curr_end_t=curr_end_t,
+                identity=target_identity,
+                user_key=user_key
+            )
+            if hist_prompt_text:
+                system_prompt += hist_prompt_text
+                print(f"[{job_id}] 已成功注入时序相邻历史档案参考 (identity={target_identity})")
+            internal_qqs = player_stats.get('internal_target_qqs') or target_qqs
+            log_text_ai = build_player_focused_log_text(log_text, target_qq=internal_qqs, target_aliases=player_stats.get('aliases'), max_chars=MAX_AI_CHARS)
+            user_badge = f"{target_display_name} (QQ:{target_qqs_str})" if target_qqs_str else target_display_name
+            user_content = f"目标分析对象：{user_badge}\n跑团日志内容如下：\n{log_text_ai}"
 
         # 【新增】：如果有自定义提示词，强行覆盖，并把标题改为自定义
         elif custom_prompt:
@@ -1932,7 +5124,7 @@ def background_process(job_id, key, password, source, is_pro=False, is_kind=Fals
             current_model = AI_MODEL_PRO if is_pro else AI_MODEL
             max_t = 65535
 
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": log_text_ai}]
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content if is_player_style else log_text_ai}]
         resp = current_client.chat.completions.create(
             model=current_model,
             messages=messages,
@@ -1952,7 +5144,7 @@ def background_process(job_id, key, password, source, is_pro=False, is_kind=Fals
         result_text, final_theme = extract_theme_from_text(result_text, theme)
 
         # 核心：风格分析模式下，优先提取大模型首行的【身份：PL/KP/双重】标签来决定图片大标题
-        if is_player_style and not custom_prompt:
+        if is_player_style:
             llm_id_match = re.search(r'【身份[:：]\s*(PL|KP|双重|玩家|主持|主持人|DM|守秘人)\s*】', result_text, re.IGNORECASE)
             llm_identity = None
             if llm_id_match:
@@ -1964,19 +5156,36 @@ def background_process(job_id, key, password, source, is_pro=False, is_kind=Fals
                 elif tag in ('双重', '兼有'):
                     llm_identity = '双重'
 
+            # 确定有效身份：优先尊重用户显式指定的身份，若未指定则采纳 LLM 识别的身份
+            norm_sp = str(specified_identity or '').strip().upper()
+            spec_clean = 'KP' if norm_sp in ('KP', 'DM', '主持', '主持人', '守秘人') else ('PL' if norm_sp in ('PL', '玩家') else ('双重' if norm_sp in ('双重', '兼有', '全能') else None))
+            effective_identity = spec_clean or llm_identity
+
             # 从正文中剥离身份标签，避免污染卡片首段文字排版
             result_text = re.sub(r'^\s*【身份[:：][^】]+】\s*(?:\r?\n)?', '', result_text, flags=re.IGNORECASE).strip()
 
             disp_name = target_display_name
-            if llm_identity == 'PL':
-                report_title = f"TRPG 玩家跑团风格报告 ({disp_name})"
-            elif llm_identity == 'KP':
-                report_title = f"TRPG 主持带团风格报告 ({disp_name})"
-            elif llm_identity == '双重':
-                report_title = f"TRPG 全能跑团/主持风格报告 ({disp_name})"
+            if not custom_prompt:
+                if effective_identity == 'PL':
+                    report_title = f"TRPG 玩家跑团风格报告 ({disp_name})"
+                elif effective_identity == 'KP':
+                    report_title = f"TRPG 主持带团风格报告 ({disp_name})"
+                elif effective_identity == '双重':
+                    report_title = f"TRPG 全能跑团/主持风格报告 ({disp_name})"
+                else:
+                    fallback_role = "主持" if player_stats.get('is_kp') else "玩家"
+                    report_title = f"TRPG {fallback_role}跑团风格报告 ({disp_name})"
             else:
-                fallback_role = "主持" if player_stats.get('is_kp') else "玩家"
-                report_title = f"TRPG {fallback_role}跑团风格报告 ({disp_name})"
+                custom_prefix = f"{custom_name}·" if custom_name else "自定义·"
+                if effective_identity == 'PL':
+                    report_title = f"TRPG {custom_prefix}玩家风格报告 ({disp_name})"
+                elif effective_identity == 'KP':
+                    report_title = f"TRPG {custom_prefix}主持风格报告 ({disp_name})"
+                elif effective_identity == '双重':
+                    report_title = f"TRPG {custom_prefix}全能风格报告 ({disp_name})"
+                else:
+                    fallback_role = "主持" if player_stats.get('is_kp') else "玩家"
+                    report_title = f"TRPG {custom_prefix}{fallback_role}风格报告 ({disp_name})"
 
         # 6. 绘图与返回
         # 自定义提示词默认由用户掌控；只有提示词明确要求普通版/标准统计表时，
@@ -1997,6 +5206,41 @@ def background_process(job_id, key, password, source, is_pro=False, is_kind=Fals
         JOB_CACHE[job_id]['images'] = images_list
         print(f"[{job_id}] 渲染处理完成")
 
+        # 风格分析模式下，且允许自动存档：保存玩家成长档案
+        if is_player_style and save_archive:
+            try:
+                sources_list = [s.get('key', '') for s in log_sources] if log_sources else ([key] if key else [])
+                # 计算时间跨度
+                if not timeline_str:
+                    if custom_timeline:
+                        timeline_str = custom_timeline
+                    else:
+                        m_dates = re.findall(r'\b(20\d{2}[-/]\d{1,2}[-/]\d{1,2})\b', (log_text[:3000] + log_text[-3000:]))
+                        if m_dates:
+                            norm_dates = sorted([d.replace('/', '-') for d in m_dates])
+                            timeline_str = f"{norm_dates[0]} ~ {norm_dates[-1]}" if norm_dates[0] != norm_dates[-1] else norm_dates[0]
+                        else:
+                            timeline_str = "无指定时间轴 (依日志顺序)"
+                target_user_val = f"{target_display_name} {clean_target_qq}".strip() if clean_target_qq else (target_display_name or target_user_input)
+                archive_dir = save_player_style_archive(
+                    target_user=target_user_val,
+                    result_text=result_text,
+                    images_list=images_list,
+                    sources=sources_list,
+                    job_id=job_id,
+                    user_key=user_key,
+                    stats=player_stats,
+                    timeline_str=timeline_str,
+                    report_title=report_title,
+                    start_t=curr_start_t,
+                    end_t=curr_end_t,
+                    specified_identity=effective_identity
+                )
+                if archive_dir:
+                    print(f"[{job_id}] 玩家风格成长档案已持久化保存至: {archive_dir}")
+            except Exception as e_arc:
+                print(f"[{job_id}] 保存风格成长档案异常: {e_arc}")
+
         # ================= 7. 写入省流缓存 =================
         if not is_pro and hash_key:
             set_daily_cache(hash_key, images_list)
@@ -2007,6 +5251,258 @@ def background_process(job_id, key, password, source, is_pro=False, is_kind=Fals
         err_img_bytes = text_to_images(f"Log处理失败：\n{str(e)}", "Error")[0]
         JOB_CACHE[job_id]['status'] = 'error'
         JOB_CACHE[job_id]['images'] = [err_img_bytes]
+
+PDF_CONVERTED_CACHE = {}
+
+def clean_and_stitch_trpg_log_text(pages_text):
+    """
+    针对 TRPG Log PDF 的排版清洗与折行拼接引擎：
+    1. 自动统计并剔除重复出现的页眉/页脚水印（如 STONY GROUNDS）以及页码、网页打印 URL 杂质
+    2. 修复折断的时间戳：[2024-05-01\n20:00:00] -> [2024-05-01 20:00:00]
+    3. 修复折断的角色与QQ：张\n三(123456): -> 张三(123456):
+    4. 支持成品小说/剧本Log行头识别（<角色名>、【角色名】、KP: 等），防止过度合并
+    5. 规范化全角括号与冒号，平滑拼接单人跨行发言
+    """
+    if isinstance(pages_text, str):
+        pages_text = [pages_text]
+
+    repeating_headers = set()
+    repeating_footers = set()
+    if len(pages_text) >= 3:
+        header_counter = {}
+        footer_counter = {}
+        for p_text in pages_text:
+            lines = [l.strip() for l in str(p_text or '').splitlines() if l.strip()]
+            if lines:
+                h_line = lines[0]
+                if len(h_line) <= 80 and not re.match(r'^\d+$', h_line):
+                    header_counter[h_line] = header_counter.get(h_line, 0) + 1
+            if len(lines) > 1:
+                f_line = lines[-1]
+                if len(f_line) <= 80 and not re.match(r'^\d+$', f_line):
+                    footer_counter[f_line] = footer_counter.get(f_line, 0) + 1
+        repeating_headers = {k for k, v in header_counter.items() if v >= 3}
+        repeating_footers = {k for k, v in footer_counter.items() if v >= 3}
+
+    page_noise_patterns = [
+        re.compile(r'^\s*第\s*\d+\s*页(?:\s*[/，,共]\s*(?:共\s*)?\d+\s*页)?\s*$', re.IGNORECASE),
+        re.compile(r'^\s*Page\s+\d+(?:\s+of\s+\d+)?\s*$', re.IGNORECASE),
+        re.compile(r'^\s*-\s*\d+\s*-\s*$'),
+        re.compile(r'^\s*\d+\s*/\s*\d+\s*$'),
+        re.compile(r'^\s*https?://\S+\s*$', re.IGNORECASE),
+        re.compile(r'^\s*file:///\S+\s*$', re.IGNORECASE),
+        re.compile(r'^\s*(?:微灾码|菠萝包|留痕|回溯之泉|trpgbot)\s*(?:跑团\s*Log|Log导出)?\s*$', re.IGNORECASE),
+    ]
+
+    all_raw_lines = []
+    for p_text in pages_text:
+        p_lines = [l.strip() for l in str(p_text or '').splitlines() if l.strip()]
+        for s in p_lines:
+            if s in repeating_headers or s in repeating_footers:
+                continue
+            if any(pat.match(s) for pat in page_noise_patterns):
+                continue
+            all_raw_lines.append(s)
+
+    joined_text = "\n".join(all_raw_lines)
+
+    # 修复折断的时间戳
+    joined_text = re.sub(
+        r'\[(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\s*\n\s*(\d{1,2}:\d{2}(?::\d{2})?)\]',
+        r'[\1 \2]',
+        joined_text
+    )
+    # 修复折断的角色名与括号QQ
+    joined_text = re.sub(
+        r'([^\n(（<\[]+)[(（<]\s*\n\s*(\d+)[)）>]',
+        r'\1(\2)',
+        joined_text
+    )
+    # 规范化角色头后的全角括号为半角 (方便通用正则提取QQ)
+    joined_text = re.sub(r'（([1-9]\d{4,11})）', r'(\1)', joined_text)
+
+    speaker_start_pat = re.compile(
+        r'^(?:'
+        r'\[?(?:(?:20\d{2})[-/.])?\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\]?\s*(?:守密人|调查员|KP|PL|DM|NPC)?[ -]?[^\n:：(（<]+[（(<]\d+[）)>]\s*[:：]?'
+        r'|'
+        r'(?:守密人|调查员|KP|PL|DM|NPC)?[ -]?[^\n:：(（<]+[（(<]\d+[）)>]\s*[:：]'
+        r'|'
+        r'[<【\[(（](?!(?:20\d{2}|https?://|\d{1,2}:\d{2}))[^>】\])）\r\n]{1,25}[>】\])）]\s*[:：]?'
+        r'|'
+        r'(?:KP|PL|DM|GM|ST|NPC|守密人|调查员|主持人|旁白)\s*[:：]'
+        r'|'
+        r'\.(?:r|ra|rc|rd|sc|st|ti|li|en)\b'
+        r'|'
+        r'(?:投掷|系统提示|检定结果|来自群.*的暗骰|暗中检定)'
+        r'|'
+        r'(?:第[一二三四五六七八九十0-9]+[章幕回节]|导入|附录|材料[一二三四0-9]+)'
+        r')',
+        re.IGNORECASE
+    )
+
+    clean_lines = []
+    current_entry = ""
+
+    for line in joined_text.splitlines():
+        line_s = line.strip()
+        if not line_s:
+            continue
+
+        if speaker_start_pat.match(line_s):
+            if current_entry:
+                clean_lines.append(current_entry)
+            current_entry = line_s
+        else:
+            if current_entry:
+                if re.search(r'[，,、]$', current_entry):
+                    current_entry += line_s
+                else:
+                    current_entry += " " + line_s
+            else:
+                current_entry = line_s
+
+    if current_entry:
+        clean_lines.append(current_entry)
+
+    return "\n".join(clean_lines)
+
+
+def convert_pdf_to_docx_bytes(clean_text, filename="log.pdf", total_pages=1):
+    """将清洗后的纯文本转为标准排版的 DOCX 字节流"""
+    doc = Document()
+    doc.add_heading(f"TRPG Log - {filename}", level=1)
+    meta = doc.add_paragraph()
+    meta.add_run(f"来源文件: {filename} | 页面数: {total_pages} | 提取字符数: {len(clean_text)}").italic = True
+
+    for line in clean_text.splitlines():
+        line_s = line.strip()
+        if not line_s:
+            continue
+        p = doc.add_paragraph(line_s)
+        if re.search(r'[（(]\d+[）)][:：]', line_s):
+            p.paragraph_format.space_before = docx.shared.Pt(4)
+
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def extract_and_convert_pdf(file_content, filename, converted_dir=None, save_converted=True):
+    """
+    统一的 PDF 提取、容错与 DOCX/TXT 转换函数：
+    1. 优先使用 pymupdf (fitz)，具备自然排版阅读顺序 (sort=True)；
+    2. 无 pymupdf 或异常时降级使用 PyPDF2；
+    3. 智能检测加密 PDF、纯图片扫描件、空文件并抛出明确友好的错误信息；
+    4. 自动生成规整的 TXT 和 DOCX 并写入缓存，返回清洗后的 Log 纯文本。
+    """
+    if not file_content:
+        return "[PDFError:Empty] 该 PDF 文件内容为空，未能读取到任何数据。"
+
+    file_hash = hashlib.md5(file_content).hexdigest()
+    pages_text = []
+    total_pages = 0
+    total_images = 0
+
+    fitz_success = False
+    if fitz is not None:
+        try:
+            pdf_doc = fitz.open(stream=file_content, filetype="pdf")
+            total_pages = len(pdf_doc)
+            if getattr(pdf_doc, 'is_encrypted', False):
+                try:
+                    pdf_doc.authenticate("")
+                except Exception:
+                    pass
+                if getattr(pdf_doc, 'is_encrypted', False):
+                    pdf_doc.close()
+                    return "[PDFError:Encrypted] 该 PDF 文件已被加密或设置了阅读密码，无法提取文字内容。\n请先解除密码后重新上传。"
+
+            for page_num in range(min(total_pages, 500)):
+                page = pdf_doc[page_num]
+                try:
+                    total_images += len(page.get_images())
+                except Exception:
+                    pass
+
+                try:
+                    blocks = page.get_text("blocks", sort=True)
+                    page_blocks_text = "\n".join([b[4] for b in blocks if b[4].strip() and b[6] == 0])
+                except Exception:
+                    page_blocks_text = page.get_text("text", sort=True)
+
+                if page_blocks_text.strip():
+                    pages_text.append(page_blocks_text)
+
+            pdf_doc.close()
+            fitz_success = True
+        except Exception as e_fitz:
+            print(f"[PDF Extract] pymupdf 解析异常 ({e_fitz})，准备尝试 PyPDF2 降级...")
+
+    if not fitz_success:
+        try:
+            reader = PyPDF2.PdfReader(BytesIO(file_content))
+            total_pages = len(reader.pages)
+            if getattr(reader, 'is_encrypted', False):
+                try:
+                    reader.decrypt("")
+                except Exception:
+                    pass
+                if getattr(reader, 'is_encrypted', False):
+                    return "[PDFError:Encrypted] 该 PDF 文件已被加密或设置了阅读密码，无法提取文字内容。\n请先解除密码后重新上传。"
+
+            for page in reader.pages[:500]:
+                t = page.extract_text() or ""
+                if t.strip():
+                    pages_text.append(t)
+        except Exception as e_pypdf:
+            return f"[PDFError:Corrupted] PDF 文件解析失败 ({str(e_pypdf)})。\n文件可能已损坏或格式不标准，建议导出为 TXT/DOCX 后重试。"
+
+    raw_combined = "".join(pages_text).strip()
+    if len(raw_combined) < 25:
+        if total_images > 0 or total_pages > 0:
+            return (
+                "[PDFError:Scanned] 该 PDF 文件为纯图片/扫描件（未包含可提取的文字图层），AI 无法直接阅读并分析玩家风格。\n"
+                "💡 建议：\n"
+                "1. 请使用带有文字图层的 PDF（如聊天记录或网页直接导出/打印生成的 PDF）；\n"
+                "2. 或直接上传导出好的 TXT、DOCX 文件或跑团网页链接；\n"
+                "3. 或先使用 OCR 工具识别生成可复制文字的双层 PDF 后重试。"
+            )
+        return "[PDFError:Empty] 该 PDF 文件内容为空，未能提取到任何有效文字。"
+
+    clean_text = clean_and_stitch_trpg_log_text(pages_text)
+    if len(clean_text.strip()) < 20:
+        clean_text = raw_combined
+
+    if save_converted:
+        try:
+            if not converted_dir:
+                converted_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pdf_converted")
+            os.makedirs(converted_dir, exist_ok=True)
+
+            safe_name = re.sub(r'[^\w\u4e00-\u9fff.-]', '_', os.path.splitext(filename)[0])[:30]
+            txt_path = os.path.join(converted_dir, f"{file_hash[:16]}_{safe_name}.txt")
+            docx_path = os.path.join(converted_dir, f"{file_hash[:16]}_{safe_name}.docx")
+
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(clean_text)
+
+            docx_bytes = convert_pdf_to_docx_bytes(clean_text, filename, total_pages)
+            with open(docx_path, "wb") as f:
+                f.write(docx_bytes)
+
+            PDF_CONVERTED_CACHE[file_hash[:16]] = {
+                'txt_path': txt_path,
+                'docx_path': docx_path,
+                'filename': filename,
+                'safe_name': safe_name,
+                'chars': len(clean_text),
+                'pages': total_pages
+            }
+            print(f"[PDF Convert] 成功将 PDF 转为 TXT 与 DOCX: {safe_name} (共 {len(clean_text)} 字符, {total_pages} 页)")
+        except Exception as e_conv:
+            print(f"[PDF Convert] 生成 DOCX/TXT 缓存失败 (不影响分析): {e_conv}")
+
+    return clean_text
 
 def extract_text_from_file(file_content, filename, card_system="auto"):
     """根据文件扩展名提取文本，增强容错能力"""
@@ -2037,15 +5533,11 @@ def extract_text_from_file(file_content, filename, card_system="auto"):
             text = "\n".join([para.text for para in doc.paragraphs])
             
         elif ext == '.pdf':
-            # 改用 pymupdf (fitz) 读取PDF，容错率极高，会自动忽略纯图片
-            import fitz
-            pdf_document = fitz.open(stream=file_content, filetype="pdf")
-            pages_text = []
-            # 限制读取前300页防撑爆内存
-            for page_num in range(min(len(pdf_document), 300)): 
-                pages_text.append(pdf_document[page_num].get_text())
-            text = "\n".join(pages_text)
-            pdf_document.close()
+            pdf_res = extract_and_convert_pdf(file_content, filename)
+            if pdf_res.startswith('[PDFError:'):
+                clean_err = re.sub(r'^\[PDFError:[^\]]+\]\s*', '', pdf_res).strip()
+                return f"[ParseError]{clean_err}"
+            text = pdf_res
 
         elif ext in ['.xlsx', '.xls']:
             # 【Excel 角色卡】：多级级联解析，保证在 openpyxl 严格校验/pandas 缺失时仍可读取
@@ -2351,70 +5843,188 @@ def extract_text_from_file(file_content, filename, card_system="auto"):
         
     return text
 
-def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=False, is_kind=False, persona="", custom_prompt="", theme='default', is_ds=False, group_key="", user_key="", custom_name="", card_system="auto", backup_model="", backup_label="", user_name="", token_module="", target_qq=""):
-    """后台任务：下载文件并根据模式进行分析，支持多模态原生文档阅读与输出多图"""
-    print(f"[{job_id}] 开始处理文件: {filename}, Mode: {mode}")
+def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=False, is_kind=False, persona="", custom_prompt="", theme='default', is_ds=False, group_key="", user_key="", custom_name="", card_system="auto", backup_model="", backup_label="", user_name="", token_module="", target_qq="", log_sources=None, save_archive=True, custom_timeline="", identity_bindings=None, specified_identity=None):
+    """后台任务：下载文件/拉取链接并根据模式进行分析，支持多文件合并、文件+链接复合串联、多模态原生文档阅读与输出多图"""
+    print(f"[{job_id}] 开始处理任务: {filename}, Mode: {mode}")
     if custom_prompt:
         _cn_tip = f"（共享库: {custom_name}）" if custom_name else "（来自请求 payload）"
         print(f"[{job_id}] 已启用自定义提示词{_cn_tip}, 长度={len(custom_prompt)}")
     try:
-        # 1. 下载文件
-        session = get_session()
-        resp = session.get(file_url, timeout=120, stream=True)
-        resp.raise_for_status()
-        
-        content = b""
-        downloaded = 0
-        for chunk in resp.iter_content(chunk_size=65536):
-            if chunk:
-                content += chunk
-                downloaded += len(chunk)
-                # 限制最大下载 50MB，防止内存爆炸
-                if downloaded > 50 * 1024 * 1024: 
-                    print(f"[{job_id}] 警告：文件超过 50MB，已被安全截断！")
-                    break
-        
-        # 2. 核心：判断是否启用 LLM 的原生多模态视觉/文档阅读能力
-        ext = os.path.splitext(filename)[1].lower()
-        user_content = None
+        if isinstance(file_url, list):
+            file_items = file_url
+        elif file_url:
+            file_items = [{'url': file_url, 'filename': filename or 'log.txt'}]
+        else:
+            file_items = []
 
-        # 【联动】：函数作用域内先声明 raw_text，方便 sheet_score 分支持久化时抽字段
+        # 1. 若传入了网络链接源，优先拉取网络 Log
+        link_sections = []
+        if log_sources:
+            print(f"[{job_id}] 检测到复合模式：正在拉取 {len(log_sources)} 个网络 Log 链接...")
+            first_ls = log_sources[0] or {}
+            ls_text, failures = fetch_and_join_logs(log_sources, first_ls.get('key'), first_ls.get('password'), first_ls.get('source'), identity_bindings=identity_bindings)
+            if failures:
+                print(f"[{job_id}] 部分网络链接拉取异常: {'；'.join(failures)}")
+            if ls_text and ls_text.strip():
+                link_sections.append({
+                    'title': f"网络Log({len(log_sources)}段)",
+                    'text': ls_text,
+                    'hash': hashlib.md5(ls_text.encode('utf-8')).hexdigest()
+                })
+
+        # 2. 依次下载并解析所有文件
+        session = get_session()
+        file_sections = []
+        single_image_content = None
+        single_image_ext = ""
+
+        for f_idx, item in enumerate(file_items, 1):
+            f_url = item.get('url')
+            f_name = item.get('filename') or f'file_{f_idx}.txt'
+            print(f"[{job_id}] 正在下载/读取文件 ({f_idx}/{len(file_items)}): {f_name}")
+            if os.path.exists(f_url) and os.path.isfile(f_url):
+                with open(f_url, 'rb') as lf:
+                    content = lf.read(50 * 1024 * 1024)
+            else:
+                resp = session.get(f_url, timeout=120, stream=True)
+                resp.raise_for_status()
+
+                content = b""
+                downloaded = 0
+                for chunk in resp.iter_content(chunk_size=65536):
+                    if chunk:
+                        content += chunk
+                        downloaded += len(chunk)
+                        if downloaded > 50 * 1024 * 1024:
+                            print(f"[{job_id}] 警告：文件 {f_name} 超过 50MB，已被安全截断！")
+                            break
+
+            ext_i = os.path.splitext(f_name)[1].lower()
+            if len(file_items) == 1 and not link_sections and ext_i in ['.jpg', '.jpeg', '.png', '.webp', '.bmp']:
+                single_image_content = content
+                single_image_ext = ext_i
+                file_sections.append({
+                    'title': f_name,
+                    'text': '',
+                    'content': content,
+                    'hash': hashlib.md5(content).hexdigest()
+                })
+                continue
+
+            txt = extract_text_from_file(content, f_name, card_system)
+            if txt.startswith("[ParseError]"):
+                clean_err = txt.replace("[ParseError]", "").strip()
+                err_img = text_to_images(clean_err, f_name, "文件解析提示", theme)[0]
+                JOB_CACHE[job_id]['status'] = 'error'
+                JOB_CACHE[job_id]['msg'] = clean_err
+                JOB_CACHE[job_id]['images'] = [err_img]
+                return
+
+            if not txt or len(txt.strip()) < 5:
+                err_msg = f"❌ 文件【{f_name}】内容为空或未能提取到有效文字，无法进行分析。"
+                err_img = text_to_images(err_msg, f_name, "文件解析提示", theme)[0]
+                JOB_CACHE[job_id]['status'] = 'error'
+                JOB_CACHE[job_id]['msg'] = err_msg
+                JOB_CACHE[job_id]['images'] = [err_img]
+                return
+
+            file_hash = hashlib.md5(content).hexdigest()
+            file_sections.append({
+                'title': f_name,
+                'text': txt,
+                'content': content,
+                'hash': file_hash
+            })
+            save_raw_log("file", file_hash[:16], txt)
+
+        # 过滤内容完全相同的重复段落
+        unique_sections = []
+        seen_section_hashes = set()
+        for sec in (link_sections + file_sections):
+            sec_txt = sec.get('text', '').strip()
+            sec_h = sec.get('hash') or hashlib.md5(sec_txt.encode('utf-8')).hexdigest()
+            if sec_h in seen_section_hashes:
+                print(f"[文件/链接去重] 发现重复内容段落: {sec.get('title')}，已自动剔除")
+                continue
+            seen_section_hashes.add(sec_h)
+            unique_sections.append(sec)
+        all_sections = unique_sections
+
+        if not all_sections:
+            err_msg = "❌ 未能获取到任何有效文件或链接内容。"
+            err_img = text_to_images(err_msg, filename or "未命名", "输入为空", theme)[0]
+            JOB_CACHE[job_id]['status'] = 'error'
+            JOB_CACHE[job_id]['msg'] = err_msg
+            JOB_CACHE[job_id]['images'] = [err_img]
+            return
+
+        # 对多段来源（包括网络链接与本地文件）按时间戳正序重排
+        for s_idx, sec in enumerate(all_sections):
+            s_t, e_t = _detect_log_time_range(None, sec.get('text', ''))
+            if not s_t and sec.get('title'):
+                s_t, e_t = _detect_log_time_range(None, sec.get('title', ''))
+            sec['start_t'] = s_t
+            sec['end_t'] = e_t
+            sec['orig_idx'] = s_idx
+        if len(all_sections) > 1:
+            all_sections.sort(key=lambda s: (0, s['start_t'], s['orig_idx']) if s.get('start_t') else (1, s.get('orig_idx', 0), s.get('orig_idx', 0)))
+
+        curr_start_t = min([s['start_t'] for s in all_sections if s.get('start_t')]) if any(s.get('start_t') for s in all_sections) else 0
+        curr_end_t = max([s['end_t'] for s in all_sections if s.get('end_t')]) if any(s.get('end_t') for s in all_sections) else 0
+
+        if custom_timeline:
+            c_s, c_e = _detect_log_time_range(None, custom_timeline)
+            if c_s:
+                curr_start_t = c_s
+                curr_end_t = c_e or c_s
+
         raw_text = ""
         calculated_statistics = []
+        user_content = None
 
-        if ext == '.pdf' and downloaded <= 40 * 1024 * 1024 and not is_ds:
-            # 【原生 PDF 阅读模式】(限制在40MB内防代理服务器 Nginx 报 413 Payload Too Large)
-            print(f"[{job_id}] 启用 LLM 原生 PDF 阅读模式 (大小: {downloaded/1024/1024:.2f}MB)")
-            base64_pdf = base64.b64encode(content).decode('utf-8')
-            user_content = [
-                {"type": "text", "text": f"文件名：{filename}\n请仔细阅读这份 PDF 模组文档（包含其排版和图像），并严格按照系统设定的板块与要求进行分析。"},
-                {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{base64_pdf}"}}
-            ]
-            
-        elif ext in ['.png', '.jpg', '.jpeg', '.webp'] and downloaded <= 20 * 1024 * 1024:
+        is_player_style = bool(target_qq) or mode in ('player_style', 'style', 'pl_style', 'kp_style')
+        is_log_mode = is_player_style or mode in ('log_analyze', 'log_recap', 'comic', 'comic_prompt', 'sheet_score')
+
+        if single_image_content and not is_log_mode:
             if is_ds:
                 raise Exception(f"{backup_label or BACKUP_MODEL_LABEL} 模型暂不支持直接读取纯图片格式，请取消备用模型参数使用默认的视觉模型！")
-            # 【原生图片阅读模式】
-            print(f"[{job_id}] 启用 LLM 原生图片阅读模式")
-            mime_type = "image/jpeg" if ext in ['.jpg', '.jpeg'] else f"image/{ext[1:]}"
-            base64_img = base64.b64encode(content).decode('utf-8')
+            mime_type = "image/jpeg" if single_image_ext in ['.jpg', '.jpeg'] else f"image/{single_image_ext[1:]}"
+            base64_img = base64.b64encode(single_image_content).decode('utf-8')
             user_content = [
                 {"type": "text", "text": f"文件名：{filename}\n请仔细观察这张图片/设定图，并严格按照系统设定的板块与要求进行分析。"},
                 {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_img}"}}
             ]
-            
+            content_hash = all_sections[0]['hash']
+            text_ai = ""
         else:
-            # 【文本提取回退模式】(非视觉格式，或文件超大)
-            print(f"[{job_id}] 启用文本本地提取模式")
-            raw_text = extract_text_from_file(content, filename, card_system)
-            
-            if raw_text.startswith("[ParseError]"):
-                raise Exception(raw_text.replace("[ParseError]", ""))
-                
-            if not raw_text or len(raw_text.strip()) < 10:
-                raise Exception("文件内容为空或提取不到文字。(如果模组全是扫描版图片且文件过大，AI暂无法阅读)")
+            if len(all_sections) == 1:
+                raw_text = all_sections[0]['text']
+                display_filename = all_sections[0]['title']
+            else:
+                chunks = []
+                for s_idx, sec in enumerate(all_sections, 1):
+                    time_info = ""
+                    if sec.get('start_t') and sec.get('end_t'):
+                        s_d = time.strftime('%Y-%m-%d', time.localtime(sec['start_t']))
+                        e_d = time.strftime('%Y-%m-%d', time.localtime(sec['end_t']))
+                        time_info = f" ({s_d} ~ {e_d})" if s_d != e_d else f" ({s_d})"
+                    elif sec.get('start_t'):
+                        s_d = time.strftime('%Y-%m-%d', time.localtime(sec['start_t']))
+                        time_info = f" ({s_d})"
+                    chunks.append(
+                        f"================================================\n"
+                        f"【时间线第 {s_idx}/{len(all_sections)} 段: {sec['title']}{time_info}】\n"
+                        f"================================================\n"
+                        f"{sec['text']}"
+                    )
+                raw_text = "\n\n".join(chunks)
+                display_parts = [sec['title'] for sec in all_sections]
+                display_filename = " + ".join(display_parts)
+                filename = display_filename
 
-            # 智能压缩文本防爆 Token
+            if identity_bindings and raw_text:
+                raw_text = apply_identity_bindings(raw_text, identity_bindings)
+
             if len(raw_text) > MAX_AI_CHARS:
                 part = int(MAX_AI_CHARS * 0.4)
                 mid = raw_text[part:-part].split('\n')
@@ -2423,26 +6033,21 @@ def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=F
             else:
                 text_ai = raw_text
 
-            user_content = f"文件名：{filename}\n内容如下：\n{text_ai}"
+            content_hash = hashlib.md5("_".join([s['hash'] for s in all_sections]).encode('utf-8')).hexdigest()
+            user_content = f"文件名/来源：{filename}\n内容如下：\n{text_ai}"
+
             if mode == 'log_analyze':
                 calculated_statistics = calculate_log_statistics(raw_text)
 
         # ================= 1. 尝试触发文件省流缓存 =================
-        # 注意：由于群文件链接 file_url 经常变，我们只能通过哈希“文件的真实数据内容”来确认是不是同一个文件
         hash_key = None
         if not is_pro:
-            if isinstance(user_content, list): 
-                content_hash = hashlib.md5(content).hexdigest()
-            else: 
-                content_hash = hashlib.md5(text_ai.encode('utf-8')).hexdigest()
-                
-            # v2：角色卡改为 QQ 归属匹配，避免继续复用旧版姓名子串误命中的图片缓存。
-            hash_str = f"file_log_stats_v4_{content_hash}_{mode}_{is_kind}_{persona}_{custom_prompt}_{theme}_{is_ds}_{card_system}_{target_qq}"
+            hash_str = f"file_log_stats_v5_{content_hash}_{mode}_{is_kind}_{persona}_{custom_prompt}_{theme}_{is_ds}_{card_system}_{target_qq}"
             hash_key = hashlib.md5(hash_str.encode('utf-8')).hexdigest()
             
             cached_images = get_daily_cache(hash_key)
             if cached_images:
-                print(f"[{job_id}] 命中今日文件内容缓存！省流模式启动，秒回历史图片。")
+                print(f"[{job_id}] 命中今日多源/文件内容缓存！省流模式启动，秒回历史图片。")
                 JOB_CACHE[job_id]['status'] = 'done'
                 JOB_CACHE[job_id]['images'] = cached_images
                 return
@@ -2450,11 +6055,11 @@ def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=F
 
         # 3. 根据不同模式分配 Prompt 与 绘图标题
         report_title = "TRPG 模组解析报告"
-        is_player_style = bool(target_qq) or mode in ('player_style', 'style', 'pl_style', 'kp_style')
         
         if is_player_style:
             target_user_input = str(target_qq or '').strip()
-            player_stats = extract_player_profile_and_stats(raw_text, target_user_input)
+            user_name_input = str(user_name or req_data.get('user_name') or '').strip()
+            player_stats = extract_player_profile_and_stats(raw_text, target_user_input, user_name=user_name_input)
 
             # 【核心拦截】：未匹配到目标人物/QQ时直接报错返回，禁止交由 LLM 产生幻觉
             if not player_stats.get('found'):
@@ -2467,16 +6072,51 @@ def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=F
                 return
 
             clean_target_qq = player_stats.get('clean_target_qq') or ""
+            target_qqs = player_stats.get('target_qqs') or ([clean_target_qq] if clean_target_qq else [])
+            target_qqs_str = "/".join(target_qqs) if target_qqs else clean_target_qq
             target_display_name = player_stats.get('display_name') or target_user_input or "玩家"
+            if custom_timeline:
+                file_timeline = custom_timeline
+            else:
+                m_dates = re.findall(r'\b(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2})?日?)\b', (raw_text[:3000] + raw_text[-3000:]))
+                if m_dates:
+                    norm_dates = sorted([d.replace('/', '-').replace('.', '-').replace('年', '-').replace('月', '-').replace('日', '') for d in m_dates])
+                    file_timeline = f"{norm_dates[0]} ~ {norm_dates[-1]}" if norm_dates[0] != norm_dates[-1] else norm_dates[0]
+                else:
+                    m_fn_dates = re.findall(r'\b(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2})?日?)\b', filename or '')
+                    if m_fn_dates:
+                        norm_fn = sorted([d.replace('/', '-').replace('.', '-').replace('年', '-').replace('月', '-').replace('日', '') for d in m_fn_dates])
+                        file_timeline = f"{norm_fn[0]} ~ {norm_fn[-1]}" if norm_fn[0] != norm_fn[-1] else norm_fn[0]
+                    else:
+                        file_timeline = "无指定时间轴 (依日志顺序)"
+
             report_title = f"TRPG 风格分析报告 ({target_display_name})"
             if custom_prompt:
-                system_prompt = custom_prompt
-                report_title = "TRPG 自定义分析报告"
+                system_prompt = build_custom_player_style_prompt(custom_prompt, player_stats, target_user_input, calculated_statistics, theme)
             else:
                 system_prompt = PLAYER_STYLE_SYSTEM_PROMPT
-                system_prompt += format_target_player_stats_for_prompt(player_stats, target_user_input)
-            text_ai = build_player_focused_log_text(raw_text, target_qq=clean_target_qq, target_aliases=player_stats.get('aliases'), max_chars=MAX_AI_CHARS)
-            user_badge = f"{target_display_name} (QQ:{clean_target_qq})" if clean_target_qq else target_display_name
+                system_prompt += format_target_player_stats_for_prompt(player_stats, target_user_input, timeline_str=file_timeline)
+
+            # 检索历史相邻档案并注入系统提示词 (前2次 + 后1次)
+            if specified_identity:
+                norm_sp = str(specified_identity).strip().upper()
+                target_identity = "KP" if norm_sp in ("KP", "DM", "主持", "主持人", "守秘人") else ("PL" if norm_sp in ("PL", "玩家") else ("KP" if player_stats.get('is_kp') else "PL"))
+            else:
+                target_identity = "KP" if player_stats.get('is_kp') else "PL"
+            target_for_history = f"{target_display_name} {clean_target_qq}".strip() if clean_target_qq else (target_display_name or target_user_input)
+            _, _, hist_prompt_text = get_adjacent_historical_records(
+                target_user=target_for_history,
+                curr_start_t=curr_start_t,
+                curr_end_t=curr_end_t,
+                identity=target_identity,
+                user_key=user_key
+            )
+            if hist_prompt_text:
+                system_prompt += hist_prompt_text
+                print(f"[{job_id}] 文件任务已成功注入时序相邻历史档案参考 (identity={target_identity})")
+            internal_qqs = player_stats.get('internal_target_qqs') or target_qqs
+            text_ai = build_player_focused_log_text(raw_text, target_qq=internal_qqs, target_aliases=player_stats.get('aliases'), max_chars=MAX_AI_CHARS)
+            user_badge = f"{target_display_name} (QQ:{target_qqs_str})" if target_qqs_str else target_display_name
             user_content = f"文件名：{filename}\n目标分析对象：{user_badge}\n日志内容如下：\n{text_ai}"
 
         # 【新增】：检测并覆盖（sheet_score 模式除外，因为要保留结构化输出模板）
@@ -2643,7 +6283,7 @@ def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=F
         result_text, final_theme = extract_theme_from_text(result_text, theme)
 
         # 核心：风格分析模式下，优先提取大模型首行的【身份：PL/KP/双重】标签来决定图片大标题
-        if is_player_style and not custom_prompt:
+        if is_player_style:
             llm_id_match = re.search(r'【身份[:：]\s*(PL|KP|双重|玩家|主持|主持人|DM|守秘人)\s*】', result_text, re.IGNORECASE)
             llm_identity = None
             if llm_id_match:
@@ -2655,19 +6295,36 @@ def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=F
                 elif tag in ('双重', '兼有'):
                     llm_identity = '双重'
 
+            # 确定有效身份：优先尊重用户显式指定的身份，若未指定则采纳 LLM 识别的身份
+            norm_sp = str(specified_identity or '').strip().upper()
+            spec_clean = 'KP' if norm_sp in ('KP', 'DM', '主持', '主持人', '守秘人') else ('PL' if norm_sp in ('PL', '玩家') else ('双重' if norm_sp in ('双重', '兼有', '全能') else None))
+            effective_identity = spec_clean or llm_identity
+
             # 从正文中剥离身份标签，避免污染卡片排版
             result_text = re.sub(r'^\s*【身份[:：][^】]+】\s*(?:\r?\n)?', '', result_text, flags=re.IGNORECASE).strip()
 
             disp_name = target_display_name
-            if llm_identity == 'PL':
-                report_title = f"TRPG 玩家跑团风格报告 ({disp_name})"
-            elif llm_identity == 'KP':
-                report_title = f"TRPG 主持带团风格报告 ({disp_name})"
-            elif llm_identity == '双重':
-                report_title = f"TRPG 全能跑团/主持风格报告 ({disp_name})"
+            if not custom_prompt:
+                if effective_identity == 'PL':
+                    report_title = f"TRPG 玩家跑团风格报告 ({disp_name})"
+                elif effective_identity == 'KP':
+                    report_title = f"TRPG 主持带团风格报告 ({disp_name})"
+                elif effective_identity == '双重':
+                    report_title = f"TRPG 全能跑团/主持风格报告 ({disp_name})"
+                else:
+                    fallback_role = "主持" if player_stats.get('is_kp') else "玩家"
+                    report_title = f"TRPG {fallback_role}跑团风格报告 ({disp_name})"
             else:
-                fallback_role = "主持" if player_stats.get('is_kp') else "玩家"
-                report_title = f"TRPG {fallback_role}跑团风格报告 ({disp_name})"
+                custom_prefix = f"{custom_name}·" if custom_name else "自定义·"
+                if effective_identity == 'PL':
+                    report_title = f"TRPG {custom_prefix}玩家风格报告 ({disp_name})"
+                elif effective_identity == 'KP':
+                    report_title = f"TRPG {custom_prefix}主持风格报告 ({disp_name})"
+                elif effective_identity == '双重':
+                    report_title = f"TRPG {custom_prefix}全能风格报告 ({disp_name})"
+                else:
+                    fallback_role = "主持" if player_stats.get('is_kp') else "玩家"
+                    report_title = f"TRPG {custom_prefix}{fallback_role}风格报告 ({disp_name})"
 
         # 4. 多图渲染与保存
         # 命中自定义配置时默认只保留用户正文/自定义图表；若提示词明确要求
@@ -2685,6 +6342,46 @@ def background_file_process(job_id, file_url, filename, mode='analyze', is_pro=F
             ) if mode == 'log_analyze' else text_to_images(result_text, filename, report_title, final_theme, token_usage)
         JOB_CACHE[job_id]['status'] = 'done'
         JOB_CACHE[job_id]['images'] = images_list
+
+        # 风格分析模式下，且允许自动存档：保存玩家成长档案
+        if is_player_style and save_archive:
+            try:
+                sources_list = [f.get('filename') or 'file' for f in file_items] + ([s.get('key', '') for s in log_sources] if log_sources else [])
+                # 计算时间跨度
+                if not file_timeline:
+                    if custom_timeline:
+                        file_timeline = custom_timeline
+                    else:
+                        m_dates = re.findall(r'\b(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2})?日?)\b', (raw_text[:3000] + raw_text[-3000:]))
+                        if m_dates:
+                            norm_dates = sorted([d.replace('/', '-').replace('.', '-').replace('年', '-').replace('月', '-').replace('日', '') for d in m_dates])
+                            file_timeline = f"{norm_dates[0]} ~ {norm_dates[-1]}" if norm_dates[0] != norm_dates[-1] else norm_dates[0]
+                        else:
+                            m_fn_dates = re.findall(r'\b(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2})?日?)\b', filename or '')
+                            if m_fn_dates:
+                                norm_fn = sorted([d.replace('/', '-').replace('.', '-').replace('年', '-').replace('月', '-').replace('日', '') for d in m_fn_dates])
+                                file_timeline = f"{norm_fn[0]} ~ {norm_fn[-1]}" if norm_fn[0] != norm_fn[-1] else norm_fn[0]
+                            else:
+                                file_timeline = "无指定时间轴 (依日志顺序)"
+                target_user_val = f"{target_display_name} {clean_target_qq}".strip() if clean_target_qq else (target_display_name or target_user_input)
+                archive_dir = save_player_style_archive(
+                    target_user=target_user_val,
+                    result_text=result_text,
+                    images_list=images_list,
+                    sources=sources_list,
+                    job_id=job_id,
+                    user_key=user_key,
+                    stats=player_stats,
+                    timeline_str=file_timeline,
+                    report_title=report_title,
+                    start_t=curr_start_t,
+                    end_t=curr_end_t,
+                    specified_identity=effective_identity
+                )
+                if archive_dir:
+                    print(f"[{job_id}] 文件任务玩家风格成长档案已持久化保存至: {archive_dir}")
+            except Exception as e_arc:
+                print(f"[{job_id}] 保存风格成长档案异常: {e_arc}")
 
         # 【新增】：角色卡评分模式额外抽取结构化字段供前端展示 + 联动存卡
         # 【联动 v2】：命中共享提示词库时（custom_prompt 非空），输出已被自定义提示词接管，
@@ -3936,7 +7633,8 @@ def render_custom_chart_page(chart, file_title, report_title, theme='default', t
         draw.text((legend_x + 32, y), str(series.get('name') or '系列'), font=fonts['normal'], fill=colors['text'])
     table_bottom = _draw_custom_data_table(draw, chart, (50, table_top, width - 50, height - 70), fonts, colors)
     footer_y = max(table_bottom + 20, height - 42)
-    draw.text((50, footer_y), f'自定义图表 · 坐标最多保留前10项{token_usage}', font=fonts['small'], fill=colors['quote'])
+    token_suffix = str(token_usage or '')
+    draw.text((50, footer_y), f'自定义图表 · 坐标最多保留前10项{token_suffix}', font=fonts['small'], fill=colors['quote'])
     buf = BytesIO(); img.convert('RGB').save(buf, 'PNG'); return buf.getvalue()
 
 def custom_prompt_requests_standard_evaluation(custom_prompt):
@@ -4532,7 +8230,10 @@ def submit_task():
     user_name = str(req_data.get('user_name', '') or '')[:80]
     custom_name = str(req_data.get('custom_name', '') or '')[:80]
     token_module = str(req_data.get('token_module', '') or '')[:60]
+    target_users = req_data.get('target_users')
     target_qq = str(req_data.get('target_user') or req_data.get('target_qq') or req_data.get('player_qq') or req_data.get('target_id') or '').strip()
+    if isinstance(target_users, list) and target_users:
+        target_qq = " ".join(str(u).strip() for u in target_users if str(u).strip())
     target_qq = re.sub(r'^(?:QQ[:：])?', '', target_qq, flags=re.IGNORECASE).strip()
     if target_qq and mode in ('analyze', '', None):
         mode = 'player_style'
@@ -4542,6 +8243,12 @@ def submit_task():
     else:
         log_sources = [item for item in log_sources[:20] if isinstance(item, dict)][:20]
 
+    save_archive = str(req_data.get('save_archive', 'true')).lower() not in ('false', '0', 'no', 'off')
+    custom_timeline = str(req_data.get('custom_timeline', '') or '').strip()
+    identity_bindings = req_data.get('identity_bindings') or {}
+    raw_spec_id = str(req_data.get('specified_identity') or req_data.get('identity') or '').strip().lower()
+    specified_identity = 'KP' if raw_spec_id in ('kp', 'host', 'dm', '主持', '主持人', '守秘人', '带团', '带团风格', 'kp风格') else ('PL' if raw_spec_id in ('pl', 'player', '玩家', '玩家风格', 'pl风格') else ('双重' if raw_spec_id in ('双重', '兼有', '全能', 'dual') else None))
+
     if not source:
         if key and '-' in key and key.split('-')[0].isdigit(): source = "trpgbot"
         elif key and ('_' in key or len(key) > 20): source = "kokona"
@@ -4550,20 +8257,34 @@ def submit_task():
     job_id = str(uuid.uuid4())
     JOB_CACHE[job_id] = {'status': 'processing', 'created': time.time()}
     
-    # 将所有参数（包括 theme、group_key）传入后台线程
-    executor.submit(background_process, job_id, key, password, source, is_pro, is_kind, mode, persona, custom_prompt, theme, is_ds, group_key, backup_model, user_key, user_name, custom_name, token_module, log_sources, target_qq)
+    # 将所有参数（包括 theme、group_key、save_archive、custom_timeline、identity_bindings、specified_identity）传入后台线程
+    executor.submit(background_process, job_id, key, password, source, is_pro, is_kind, mode, persona, custom_prompt, theme, is_ds, group_key, backup_model, user_key, user_name, custom_name, token_module, log_sources, target_qq, save_archive, custom_timeline, identity_bindings, specified_identity)
     return jsonify({'status': 'ok', 'id': job_id})
 
 
 @app.route('/api/submit_file', methods=['GET', 'POST'])
 def submit_file_task():
-    """提交本地文件分析任务 (统一且安全的参数提取)"""
+    """提交本地文件分析任务 (统一且安全的参数提取，支持多文件与文件+链接复合串联)"""
     if len(JOB_CACHE) > 100: JOB_CACHE.clear()
     
     req_data = request.get_json(silent=True) or {} if request.method == 'POST' else request.args
 
     file_url = req_data.get('url')
     filename = req_data.get('filename')
+    files_input = req_data.get('files')
+    log_sources = req_data.get('log_sources') or []
+
+    # 规整文件列表
+    if files_input and isinstance(files_input, list):
+        file_items = [f for f in files_input if isinstance(f, dict) and f.get('url')]
+    elif file_url:
+        file_items = [{'url': file_url, 'filename': filename or 'log.txt'}]
+    else:
+        file_items = []
+
+    if not file_items and not log_sources:
+        return jsonify({'status': 'error', 'msg': 'Missing url, files, or log_sources'})
+
     mode = req_data.get('mode', 'analyze')
     is_pro = str(req_data.get('pro', 'false')).lower() == 'true'
     is_kind = str(req_data.get('kind', 'false')).lower() == 'true'
@@ -4581,19 +8302,32 @@ def submit_file_task():
     card_system = str(req_data.get('card_system', 'auto') or 'auto').strip().lower()
     if card_system not in ('auto', 'coc', 'dnd'):
         card_system = 'auto'
+    target_users = req_data.get('target_users')
     target_qq = str(req_data.get('target_user') or req_data.get('target_qq') or req_data.get('player_qq') or req_data.get('target_id') or '').strip()
+    if isinstance(target_users, list) and target_users:
+        target_qq = " ".join(str(u).strip() for u in target_users if str(u).strip())
     target_qq = re.sub(r'^(?:QQ[:：])?', '', target_qq, flags=re.IGNORECASE).strip()
     if target_qq and mode in ('analyze', '', None):
         mode = 'player_style'
-    
-    if not file_url or not filename: 
-        return jsonify({'status': 'error', 'msg': 'Missing url or filename'})
+    save_archive = str(req_data.get('save_archive', 'true')).lower() not in ('false', '0', 'no', 'off')
+    custom_timeline = str(req_data.get('custom_timeline', '') or '').strip()
+    identity_bindings = req_data.get('identity_bindings') or {}
+    raw_spec_id = str(req_data.get('specified_identity') or req_data.get('identity') or '').strip().lower()
+    specified_identity = 'KP' if raw_spec_id in ('kp', 'host', 'dm', '主持', '主持人', '守秘人', '带团', '带团风格', 'kp风格') else ('PL' if raw_spec_id in ('pl', 'player', '玩家', '玩家风格', 'pl风格') else ('双重' if raw_spec_id in ('双重', '兼有', '全能', 'dual') else None))
+
+    if not filename:
+        if file_items:
+            filename = " + ".join([f.get('filename') or 'log.txt' for f in file_items])
+        elif log_sources:
+            filename = f"网络Log({len(log_sources)}段)"
+        else:
+            filename = "log.txt"
 
     job_id = str(uuid.uuid4())
     JOB_CACHE[job_id] = {'status': 'processing', 'created': time.time()}
     
-    # 将所有参数（包括 theme、group_key、user_key、custom_name）传入后台线程
-    executor.submit(background_file_process, job_id, file_url, filename, mode, is_pro, is_kind, persona, custom_prompt, theme, is_ds, group_key, user_key, custom_name, card_system, backup_model, backup_label, user_name, token_module, target_qq)
+    # 将所有参数（包括 file_items、log_sources、save_archive、custom_timeline、identity_bindings、specified_identity）传入后台线程
+    executor.submit(background_file_process, job_id, file_items, filename, mode, is_pro, is_kind, persona, custom_prompt, theme, is_ds, group_key, user_key, custom_name, card_system, backup_model, backup_label, user_name, token_module, target_qq, log_sources, save_archive, custom_timeline, identity_bindings, specified_identity)
     return jsonify({'status': 'ok', 'id': job_id})
 
 
@@ -4763,6 +8497,121 @@ def api_sheet_cards_clear():
         return jsonify({'status': 'error', 'msg': str(e)})
 
 
+@app.route('/api/player_style_archive', methods=['GET'])
+def api_player_style_archive():
+    """查询玩家跑团成长档案与历史演化摘要，支持 PL/KP 过滤，优先返回卷宗长图任务 ID"""
+    try:
+        target = request.args.get('target', '').strip()
+        identity = request.args.get('identity', '').strip()
+        if not target:
+            return jsonify({'status': 'error', 'msg': '缺少查询目标 target 参数 (QQ号或角色名)'}), 400
+        res = load_player_growth_summary(target, identity_filter=identity)
+        if res.get('found'):
+            data = res.get('data') or {}
+            if 'summary_text' not in data and 'summary_text' in res:
+                data['summary_text'] = res['summary_text']
+            job_id = res.get('id', '')
+            img_count = res.get('image_count', 0)
+            data['id'] = job_id
+            data['image_count'] = img_count
+            return jsonify({
+                'status': 'ok',
+                'found': True,
+                'data': data,
+                'id': job_id,
+                'image_count': img_count,
+                'summary_text': data.get('summary_text', '')
+            })
+        return jsonify({'status': 'ok', 'found': False, 'msg': res.get('msg', '未找到成长档案')})
+    except Exception as exc:
+        print(f"[风格档案查询异常] {exc}")
+        return jsonify({'status': 'error', 'msg': f'查询成长档案失败: {exc}'}), 500
+
+
+@app.route('/api/player_style_archive/update_timeline', methods=['GET', 'POST'])
+def api_update_player_style_timeline():
+    """修补玩家战役时间跨度并自动重排历史战役与刷新长图"""
+    if request.method == 'POST':
+        payload = request.get_json(silent=True) or {}
+    else:
+        payload = request.args.to_dict()
+    
+    target = str(payload.get('target') or '').strip()
+    new_timeline = str(payload.get('new_timeline') or payload.get('timeline') or '').strip()
+    battle_idx = payload.get('battle_idx') or payload.get('index') or payload.get('idx')
+    identity = str(payload.get('identity') or 'pl').strip()
+    battle_keyword = str(payload.get('battle_keyword') or payload.get('keyword') or '').strip()
+    operator_qq = str(payload.get('operator_qq') or payload.get('user_qq') or payload.get('qq') or '').strip()
+
+    if not target:
+        return jsonify({'status': 'error', 'msg': '缺少查询目标 target 参数 (QQ号或角色名)'}), 400
+    if not new_timeline:
+        return jsonify({'status': 'error', 'msg': '缺少新的时间轴参数 (new_timeline / timeline)'}), 400
+
+    res = update_player_archive_timeline(
+        target_query=target,
+        battle_idx=battle_idx,
+        new_timeline=new_timeline,
+        identity_filter=identity,
+        battle_keyword=battle_keyword,
+        operator_qq=operator_qq
+    )
+    if res.get('success'):
+        return jsonify({
+            'status': 'ok',
+            'success': True,
+            'msg': res.get('msg', ''),
+            'data': res,
+            'id': res.get('id', ''),
+            'image_count': res.get('image_count', 0)
+        })
+    return jsonify({
+        'status': 'error',
+        'success': False,
+        'msg': res.get('msg', '修补战役时间轴失败')
+    }), 400
+
+
+@app.route('/api/player_style_archive/rename', methods=['GET', 'POST'])
+def api_rename_player_archive():
+    """修改玩家成长档案中的归档对象名称并自动重新渲染长图"""
+    if request.method == 'POST':
+        payload = request.get_json(silent=True) or {}
+    else:
+        payload = request.args.to_dict()
+
+    target = str(payload.get('target') or '').strip()
+    new_name = str(payload.get('new_name') or payload.get('name') or '').strip()
+    identity = str(payload.get('identity') or 'pl').strip()
+    operator_qq = str(payload.get('operator_qq') or payload.get('user_qq') or payload.get('qq') or '').strip()
+
+    if not target:
+        return jsonify({'status': 'error', 'msg': '缺少查询目标 target 参数 (QQ号或原角色名)'}), 400
+    if not new_name:
+        return jsonify({'status': 'error', 'msg': '缺少新名称 new_name 参数'}), 400
+
+    res = rename_player_archive(
+        target_query=target,
+        new_name=new_name,
+        identity_filter=identity,
+        operator_qq=operator_qq
+    )
+    if res.get('success'):
+        return jsonify({
+            'status': 'ok',
+            'success': True,
+            'msg': res.get('msg', ''),
+            'data': res,
+            'id': res.get('id', ''),
+            'image_count': res.get('image_count', 0)
+        })
+    return jsonify({
+        'status': 'error',
+        'success': False,
+        'msg': res.get('msg', '修改档案对象名称失败')
+    }), 400
+
+
 @app.route('/api/status', methods=['GET'])
 def check_status():
     """查询任务状态，附带图像数量"""
@@ -4822,6 +8671,38 @@ def module_download():
     threading.Timer(600, cleanup).start()
 
     return send_file(path, as_attachment=True, download_name=job.get('download_name', 'module.zip'))
+
+@app.route('/api/download_converted', methods=['GET'])
+def download_converted_file():
+    """下载 PDF 转换后的 DOCX 或 TXT 格式文件"""
+    file_hash = str(request.args.get('hash') or request.args.get('id') or '').strip()
+    fmt = (request.args.get('format') or 'docx').lower().strip('.')
+    if fmt not in ('docx', 'txt'):
+        fmt = 'docx'
+
+    entry = PDF_CONVERTED_CACHE.get(file_hash)
+    target_path = None
+    download_name = None
+
+    if entry:
+        target_path = entry.get(f'{fmt}_path')
+        safe_name = entry.get('safe_name') or 'converted'
+        download_name = f"{safe_name}.{fmt}"
+
+    if not target_path or not os.path.isfile(target_path):
+        converted_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pdf_converted")
+        if os.path.isdir(converted_dir) and file_hash:
+            for fname in os.listdir(converted_dir):
+                if fname.startswith(file_hash) and fname.endswith(f".{fmt}"):
+                    target_path = os.path.join(converted_dir, fname)
+                    download_name = fname.split('_', 1)[-1] if '_' in fname else fname
+                    break
+
+    if not target_path or not os.path.isfile(target_path):
+        return jsonify({'status': 'not_found', 'msg': '转换文件不存在或已过期'}), 404
+
+    return send_file(target_path, as_attachment=True, download_name=download_name or f"converted.{fmt}")
+
 
 @app.route('/api/result', methods=['GET'])
 def get_result():
@@ -5590,6 +9471,62 @@ def background_generate_comic(job_id, log_text, pages=6, style=COMIC_STYLE_DEFAU
         JOB_CACHE[job_id]['status'] = 'error'
         JOB_CACHE[job_id]['images'] = [err]
 
+def _extract_compound_log_text(log_sources=None, file_items=None, card_system="auto", identity_bindings=None):
+    """统一从网络链接与本地群文件中抓取并拼接 Log 文本"""
+    sections = []
+    if log_sources:
+        first = log_sources[0] or {}
+        ls_text, failures = fetch_and_join_logs(log_sources, first.get('key'), first.get('password'), first.get('source'), identity_bindings=identity_bindings)
+        if failures:
+            print(f"[compound] 部分网络 Log 读取异常: {'；'.join(failures)}")
+        if ls_text and ls_text.strip():
+            sections.append({
+                'title': f"网络Log({len(log_sources)}段)",
+                'text': ls_text
+            })
+    if file_items:
+        session = get_session()
+        for f_idx, item in enumerate(file_items, 1):
+            f_url = item.get('url')
+            f_name = item.get('filename') or f'file_{f_idx}.txt'
+            if os.path.exists(f_url) and os.path.isfile(f_url):
+                with open(f_url, 'rb') as lf:
+                    content = lf.read(50 * 1024 * 1024)
+            else:
+                resp = session.get(f_url, timeout=120, stream=True)
+                resp.raise_for_status()
+                content = b""
+                downloaded = 0
+                for chunk in resp.iter_content(chunk_size=65536):
+                    if chunk:
+                        content += chunk
+                        downloaded += len(chunk)
+                        if downloaded > 50 * 1024 * 1024:
+                            break
+            txt = extract_text_from_file(content, f_name, card_system)
+            if txt and not txt.startswith("[ParseError]") and len(txt.strip()) >= 5:
+                sections.append({
+                    'title': f_name,
+                    'text': txt
+                })
+    if not sections:
+        return ""
+    if len(sections) == 1:
+        res = sections[0]['text']
+    else:
+        chunks = []
+        for s_idx, sec in enumerate(sections, 1):
+            chunks.append(
+                f"================================================\n"
+                f"【来源 {s_idx}/{len(sections)}: {sec['title']}】\n"
+                f"================================================\n"
+                f"{sec['text']}"
+            )
+        res = "\n\n".join(chunks)
+    if identity_bindings and res:
+        res = apply_identity_bindings(res, identity_bindings)
+    return res
+
 @app.route('/api/submit_comic', methods=['POST'])
 def submit_comic_task():
     if len(JOB_CACHE) > 100:
@@ -5609,18 +9546,16 @@ def submit_comic_task():
     backup_model = str(payload.get('backup_model') or '')[:128]
     backup_label = str(payload.get('backup_label') or '')[:40]
     log_sources = payload.get('log_sources') or []
-    log_text = ''
+    files_input = payload.get('files')
+    if files_input and isinstance(files_input, list):
+        file_items = [f for f in files_input if isinstance(f, dict) and f.get('url')]
+    elif payload.get('url'):
+        file_items = [{'url': payload.get('url'), 'filename': payload.get('filename') or 'log.txt'}]
+    else:
+        file_items = []
+    identity_bindings = payload.get('identity_bindings') or {}
     try:
-        if log_sources:
-            first = log_sources[0] or {}
-            log_text, failures = fetch_and_join_logs(log_sources, first.get('key'), first.get('password'), first.get('source'))
-            if failures:
-                print(f"[comic] 部分 Log 读取失败: {'；'.join(failures)}")
-        elif payload.get('url'):
-            response = get_session().get(str(payload.get('url')), timeout=120)
-            response.raise_for_status()
-            filename = _infer_uploaded_filename(response.content, payload.get('filename') or 'log.txt')
-            log_text = extract_text_from_file(response.content, filename)
+        log_text = _extract_compound_log_text(log_sources, file_items, identity_bindings=identity_bindings)
     except Exception as exc:
         return jsonify({'status': 'error', 'msg': f'Log 读取失败: {exc}'}), 400
     if not log_text or len(log_text.strip()) < 20:
@@ -5665,19 +9600,16 @@ def test_comic_prompt_task():
     group_key = str(payload.get('group_key') or '').strip()[:128]
     character_bible = str(payload.get('character_bible') or '').strip()[:2400]
     log_sources = payload.get('log_sources') or []
+    files_input = payload.get('files')
+    if files_input and isinstance(files_input, list):
+        file_items = [f for f in files_input if isinstance(f, dict) and f.get('url')]
+    elif payload.get('url'):
+        file_items = [{'url': payload.get('url'), 'filename': payload.get('filename') or 'log.txt'}]
+    else:
+        file_items = []
+    identity_bindings = payload.get('identity_bindings') or {}
     try:
-        if log_sources:
-            first = log_sources[0] or {}
-            log_text, failures = fetch_and_join_logs(log_sources, first.get('key'), first.get('password'), first.get('source'))
-            if failures:
-                print(f"[comic-prompt] 部分 Log 读取失败: {'；'.join(failures)}")
-        elif payload.get('url'):
-            response = get_session().get(str(payload.get('url')), timeout=120)
-            response.raise_for_status()
-            filename = _infer_uploaded_filename(response.content, payload.get('filename') or 'log.txt')
-            log_text = extract_text_from_file(response.content, filename)
-        else:
-            log_text = ''
+        log_text = _extract_compound_log_text(log_sources, file_items, identity_bindings=identity_bindings)
     except Exception as exc:
         return jsonify({'status': 'error', 'msg': f'Log 读取失败: {exc}'}), 400
     if not log_text or len(log_text.strip()) < 20:
@@ -5717,5 +9649,9 @@ def submit_image_gen_task():
 if __name__ == '__main__':
     disable_quick_edit()
     if not os.path.exists("./fonts"): os.makedirs("./fonts")
+    try:
+        heal_all_player_archives()
+    except Exception:
+        pass
     print("Async Log Server Started (Port: 8000)")
     app.run(host='0.0.0.0', port=8000)
