@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         QQ官方Bot昵称桥接
 // @author       local
-// @version      1.8.0
+// @version      1.9.0
 // @description  将QQ官方Bot身份绑定到原QQ/QQ群，并同步平台昵称到AIPlugin用户档案。
-// @timestamp    2026-09-11
+// @timestamp    2026-09-28
 // @license      MIT
 // @sealVersion  1.6.0
 // ==/UserScript==
@@ -11,7 +11,7 @@
 (() => {
 const EXT_NAME = 'qq-official-name-bridge';
 const AI_EXT_NAME = 'aiplugin4';
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const CARD_RECOVERY_DECOYS = [
   '艾琳娜·沃森', '格兰特·霍尔', '维克托·莱恩', '莉迪亚·格雷', '诺亚·贝克',
@@ -237,23 +237,40 @@ function replyWithButtons(ctx, msg, text, buttonRows) {
   }
 }
 
+function extractBotId(identity) {
+  if (typeof identity !== 'string') return '';
+  const m = /^OpenQQ(?:-Group)?:([^-:]+)-/.exec(identity);
+  return m ? m[1] : '';
+}
+
 function getOfficialQQIdentity(userId) {
   if (typeof userId !== 'string') return null;
 
-  const groupOrC2C = /^OpenQQ:[^-]+-(.+)$/.exec(userId);
-  if (groupOrC2C) {
-    return { userId, opaqueId: groupOrC2C[1] };
+  const openqq = /^OpenQQ:(?:([^-:]+)-)?(.+)$/.exec(userId);
+  if (openqq) {
+    return { userId, botId: openqq[1] || '', opaqueId: openqq[2] };
+  }
+
+  if (userId.startsWith('OpenQQ-Member-T:')) {
+    const raw = userId.slice('OpenQQ-Member-T:'.length);
+    const lastHyphen = raw.lastIndexOf('-');
+    const opaqueId = lastHyphen !== -1 ? raw.slice(lastHyphen + 1) : raw;
+    return { userId, botId: extractBotId(userId), opaqueId };
   }
 
   if (userId.startsWith('OpenQQCH:') && userId.length > 'OpenQQCH:'.length) {
-    return { userId, opaqueId: userId.slice('OpenQQCH:'.length) };
+    return { userId, botId: '', opaqueId: userId.slice('OpenQQCH:'.length) };
   }
 
   return null;
 }
 
 function isOfficialGroupId(groupId) {
-  return typeof groupId === 'string' && /^OpenQQ-Group:[^-]+-.+/.test(groupId);
+  if (typeof groupId !== 'string') return false;
+  return /^OpenQQ-Group:(?:[^-:]+-)?./.test(groupId) ||
+    /^OpenQQ-Group-T:/.test(groupId) ||
+    groupId.startsWith('OpenQQCH-Guild:') ||
+    groupId.startsWith('OpenQQCH-Channel:');
 }
 
 function normalizeLegacyUserId(value) {
@@ -285,11 +302,25 @@ function readReverseBinding(kind, legacyId) {
 }
 
 function resolveUserId(userId) {
-  return getOfficialQQIdentity(userId) ? (readBinding('user', userId) || userId) : userId;
+  if (!getOfficialQQIdentity(userId)) return userId;
+  const target = readBinding('user', userId);
+  if (!target) return userId;
+  if (getOfficialQQIdentity(target)) {
+    const chained = readBinding('user', target);
+    if (chained) return chained;
+  }
+  return target;
 }
 
 function resolveGroupId(groupId) {
-  return isOfficialGroupId(groupId) ? (readBinding('group', groupId) || groupId) : groupId;
+  if (!isOfficialGroupId(groupId)) return groupId;
+  const target = readBinding('group', groupId);
+  if (!target) return groupId;
+  if (isOfficialGroupId(target)) {
+    const chained = readBinding('group', target);
+    if (chained) return chained;
+  }
+  return target;
 }
 
 function getUserBindingStatus(userId) {
@@ -444,9 +475,7 @@ function findAlternateBinding(kind, legacyId, excludedOfficialId) {
 }
 
 function isCurrentOfficialUserId(userId) {
-  const value = String(userId || '');
-  return /^OpenQQ:\d{5,12}-.+/.test(value) ||
-    (value.startsWith('OpenQQCH:') && value.length > 'OpenQQCH:'.length);
+  return !!getOfficialQQIdentity(userId);
 }
 
 function restoreStoredUserBinding(officialId, legacyId) {
@@ -477,12 +506,14 @@ function readPrimaryUserBinding(legacyId) {
 function isMigratedVersionOfOfficialUser(storedId, currentId) {
   if (storedId === currentId) return true;
   const currentIdentity = getOfficialQQIdentity(currentId);
-  if (!currentIdentity || currentIdentity.opaqueId.length < 8) return false;
+  if (!currentIdentity || currentIdentity.opaqueId.length < 4) return false;
 
   const storedIdentity = getOfficialQQIdentity(storedId);
   if (storedIdentity && storedIdentity.opaqueId === currentIdentity.opaqueId) return true;
-  return String(storedId || '').startsWith('OpenQQ-Member-T:') &&
-    String(storedId).endsWith(`-${currentIdentity.opaqueId}`);
+  if (String(storedId || '').startsWith('OpenQQ-Member-T:') &&
+      String(storedId).endsWith(`-${currentIdentity.opaqueId}`)) return true;
+
+  return false;
 }
 
 function promoteMigratedPrimaryBinding(storedId, currentId, legacyId) {
@@ -501,11 +532,11 @@ function repairReverseBinding(kind, legacyId, removedOfficialId) {
   );
 }
 
-function writeBinding(kind, officialId, legacyId, ownerId) {
+function writeBinding(kind, officialId, legacyId, ownerId, allowOverwrite = false) {
   const claimedBy = kind === 'user'
     ? readPrimaryUserBinding(legacyId)
     : readReverseBinding(kind, legacyId);
-  if (kind === 'group' && claimedBy && claimedBy !== officialId) {
+  if (kind === 'group' && claimedBy && claimedBy !== officialId && !allowOverwrite) {
     throw new Error('该QQ群已经绑定了另一个官Bot群');
   }
 
@@ -513,8 +544,16 @@ function writeBinding(kind, officialId, legacyId, ownerId) {
   if (oldLegacyId && oldLegacyId !== legacyId) {
     repairReverseBinding(kind, oldLegacyId, officialId);
   }
+  if (claimedBy && claimedBy !== officialId && allowOverwrite) {
+    if (kind === 'group') {
+      ext.storageSet(bindingKey(kind, claimedBy), '');
+      ext.storageSet(`binding:group-owner:${claimedBy}`, '');
+      removeCoreAlias(claimedBy);
+      forgetBinding(claimedBy);
+    }
+  }
   ext.storageSet(bindingKey(kind, officialId), legacyId);
-  if (!claimedBy || claimedBy === officialId) {
+  if (!claimedBy || claimedBy === officialId || allowOverwrite) {
     ext.storageSet(reverseBindingKey(kind, legacyId), officialId);
   }
   if (kind === 'group' && ownerId) ext.storageSet(`binding:group-owner:${officialId}`, ownerId);
@@ -532,6 +571,19 @@ function removeBinding(kind, officialId, legacyId) {
       forgetBinding(item.officialId);
     });
     ext.storageSet(reverseBindingKey('user', legacyId), '');
+    return matches.length > 0;
+  }
+
+  if (kind === 'group' && !officialId && legacyId) {
+    const matches = loadBindingIndex().filter(item => item &&
+      item.kind === 'group' && item.legacyId === legacyId);
+    matches.forEach(item => {
+      ext.storageSet(bindingKey('group', item.officialId), '');
+      ext.storageSet(`binding:group-owner:${item.officialId}`, '');
+      removeCoreAlias(item.officialId);
+      forgetBinding(item.officialId);
+    });
+    ext.storageSet(reverseBindingKey('group', legacyId), '');
     return matches.length > 0;
   }
 
@@ -802,15 +854,55 @@ function syncNickname(ctx, msg) {
   }
 }
 
+function formatTimestamp(ts) {
+  if (!ts) return '未知时间';
+  const num = Number(ts);
+  const d = new Date(num > 1e11 ? num : num * 1000);
+  if (isNaN(d.getTime())) return '未知时间';
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function maskGroupId(gid) {
+  const str = String(gid || '');
+  if (str.length <= 14) return str;
+  return str.slice(0, 10) + '***' + str.slice(-4);
+}
+
+function findOfficialQQGroupLogCandidates(logName) {
+  if (typeof seal.findOfficialQQGroupLogCandidates === 'function') {
+    try {
+      const res = seal.findOfficialQQGroupLogCandidates(logName);
+      let list = [];
+      if (Array.isArray(res)) {
+        list = res;
+      } else if (res && Array.isArray(res.candidates)) {
+        list = res.candidates;
+      }
+      return list.map(c => {
+        if (!c) return null;
+        return {
+          ...c,
+          characterNames: c.characterNames || c.characters || []
+        };
+      }).filter(Boolean);
+    } catch (err) {
+      console.warn(`[${EXT_NAME}] 查询Log候选失败: ${err.message || err}`);
+    }
+  }
+  return [];
+}
+
 const cmdUserBind = seal.ext.newCmdItemInfo();
 cmdUserBind.name = 'QQ绑定';
 cmdUserBind.help = `将QQ官Bot身份绑定到原QQ号，以继续使用原有插件数据。
 官Bot侧：.QQ绑定 <原QQ号>
+换号换绑：.QQ绑定 换绑 <原QQ号>
 原QQ侧：.QQ绑定确认 <验证码>
 旧Bot不可用：.QQ绑定验证 <验证码> <选项序号>
 其他官Bot群：发起后回首次绑定处使用 .QQ绑定确认 <验证码>
 查看：.QQ绑定 状态
-解除：.QQ绑定 解绑`;
+解除：.QQ绑定 解绑 [原QQ号]`;
 cmdUserBind.solve = (ctx, msg, cmdArgs) => {
   const op = String(cmdArgs.getArgN(1) || '状态').trim();
   const userId = currentUserId(ctx, msg);
@@ -856,9 +948,23 @@ cmdUserBind.solve = (ctx, msg, cmdArgs) => {
   }
 
   if (op === '解绑' || op.toLowerCase() === 'unbind') {
-    const removed = officialIdentity
-      ? removeBinding('user', userId, '')
-      : removeBinding('user', '', legacyUserId);
+    const rawTarget = String(cmdArgs.getArgN(2) || '').trim();
+    const explicitTarget = normalizeLegacyUserId(rawTarget);
+    let removed = false;
+    if (explicitTarget) {
+      const isOwner = (officialIdentity && readBinding('user', userId) === explicitTarget) || legacyUserId === explicitTarget;
+      const isPrivileged = Number(ctx && ctx.privilegeLevel || 0) >= 100;
+      if (isOwner || isPrivileged) {
+        removed = removeBinding('user', '', explicitTarget);
+      } else {
+        seal.replyToSender(ctx, msg, '只有该QQ号本人或骰主可以解除该指定QQ绑定。');
+        return commandResult();
+      }
+    } else {
+      removed = officialIdentity
+        ? removeBinding('user', userId, '')
+        : removeBinding('user', '', legacyUserId);
+    }
     replyWithButtons(ctx, msg, removed ? 'QQ身份绑定已解除。' : '当前身份没有可解除的QQ绑定。',
       officialIdentity ? [
         [
@@ -869,12 +975,20 @@ cmdUserBind.solve = (ctx, msg, cmdArgs) => {
     return commandResult();
   }
 
+  let isExplicitSwitch = false;
+  let target = '';
+  if (op === '换号' || op === '换绑' || op.toLowerCase() === 'switch' || op.toLowerCase() === 'rebind') {
+    isExplicitSwitch = true;
+    target = normalizeLegacyUserId(cmdArgs.getArgN(2));
+  } else {
+    target = normalizeLegacyUserId(op);
+  }
+
   if (!officialIdentity) {
     seal.replyToSender(ctx, msg, '请先在QQ官Bot会话中使用 .QQ绑定 <原QQ号> 发起绑定。');
     return commandResult();
   }
 
-  const target = normalizeLegacyUserId(op);
   if (!target) {
     replyWithButtons(ctx, msg, 'QQ号格式不正确。用法：.QQ绑定 <原QQ号>', [
       [
@@ -893,8 +1007,16 @@ cmdUserBind.solve = (ctx, msg, cmdArgs) => {
     ]);
     return commandResult();
   }
+
   const primaryOfficialId = readPrimaryUserBinding(target);
-  if (primaryOfficialId && primaryOfficialId !== userId) {
+  const storedBot = extractBotId(primaryOfficialId);
+  const currentBot = officialIdentity.botId;
+  const isCrossBot = primaryOfficialId && (
+    isExplicitSwitch ||
+    (storedBot && currentBot && storedBot !== currentBot)
+  );
+
+  if (primaryOfficialId && primaryOfficialId !== userId && !isCrossBot) {
     const code = createPending('user-link', userId, target, userId, {
       primaryOfficialId,
       targetGroupId: currentGroupId(ctx, msg)
@@ -914,16 +1036,26 @@ cmdUserBind.solve = (ctx, msg, cmdArgs) => {
 
   const cooldown = remainingCardRecoveryCooldown(userId);
   const quiz = cooldown > 0 ? null : buildCardRecoveryQuiz(target);
-  const pendingExtra = { targetGroupId: currentGroupId(ctx, msg) };
+  const pendingExtra = {
+    targetGroupId: currentGroupId(ctx, msg),
+    primaryOfficialId: primaryOfficialId || '',
+    isSwitchBot: !!isCrossBot
+  };
   if (quiz && quiz.available) {
     pendingExtra.quizAnswer = quiz.answer;
     pendingExtra.quizHasCards = quiz.hasCards;
   }
   const code = createPending('user', userId, target, userId, pendingExtra);
-  const lines = [
-    `绑定验证码：${code}`,
-    `旧Bot可用时，请在10分钟内使用原QQ号发送：.QQ绑定确认 ${code}`
-  ];
+  const lines = isCrossBot
+    ? [
+        `检测到原QQ号曾绑定至旧Bot账号（前缀/OpenID已变更）。`,
+        `换绑验证码：${code}`,
+        `旧Bot可用时，请在10分钟内使用原QQ号发送：.QQ绑定确认 ${code}`
+      ]
+    : [
+        `绑定验证码：${code}`,
+        `旧Bot可用时，请在10分钟内使用原QQ号发送：.QQ绑定确认 ${code}`
+      ];
   let buttonRows = [];
   if (quiz && quiz.available) {
     lines.push('', renderCardRecoveryQuiz(code, quiz));
@@ -969,12 +1101,16 @@ cmdUserConfirm.solve = (ctx, msg, cmdArgs) => {
         console.warn(`[${EXT_NAME}] 升级老版首绑身份失败: ${err.message || err}`);
       }
     }
+    const legacyConfirmer = normalizeLegacyUserId(confirmerId);
+    if (!primaryConfirmed && legacyConfirmer && legacyConfirmer === pending.legacyId) {
+      primaryConfirmed = true;
+    }
     if (!primaryConfirmed) {
       seal.replyToSender(ctx, msg, '追加绑定必须回到首次完成QQ绑定的官Bot群或会话，由本人确认。');
       return commandResult();
     }
     try {
-      writeBinding('user', pending.officialId, pending.legacyId, pending.requesterId);
+      writeBinding('user', pending.officialId, pending.legacyId, pending.requesterId, true);
       inheritCoreCharacterBinding(pending.targetGroupId, pending.officialId);
       consumePending(code, pending);
       replyWithButtons(ctx, msg, '当前新群的官Bot身份已追加绑定，无需重复进行原QQ或角色卡验证。', [
@@ -992,10 +1128,12 @@ cmdUserConfirm.solve = (ctx, msg, cmdArgs) => {
     return commandResult();
   }
   try {
-    writeBinding('user', pending.officialId, pending.legacyId, pending.requesterId);
+    writeBinding('user', pending.officialId, pending.legacyId, pending.requesterId, true);
     inheritCoreCharacterBinding(pending.targetGroupId, pending.officialId);
     consumePending(code, pending);
-    replyWithButtons(ctx, msg, 'QQ身份绑定成功，官Bot侧插件将继续使用该QQ号对应的历史数据。', [
+    replyWithButtons(ctx, msg, pending.isSwitchBot
+      ? 'QQ身份换绑成功，已升级为最新主绑定，官Bot侧插件将继续使用该QQ号对应的历史数据。'
+      : 'QQ身份绑定成功，官Bot侧插件将继续使用该QQ号对应的历史数据。', [
       [{ label: '📊 查看绑定状态', command: '.QQ绑定 状态', enter: true, style: 1 }]
     ]);
   } catch (err) {
@@ -1035,12 +1173,12 @@ cmdUserCardVerify.solve = (ctx, msg, cmdArgs) => {
     return commandResult();
   }
   try {
-    writeBinding('user', pending.officialId, pending.legacyId, pending.requesterId);
+    writeBinding('user', pending.officialId, pending.legacyId, pending.requesterId, true);
     inheritCoreCharacterBinding(pending.targetGroupId, pending.officialId);
     consumePending(code, pending);
     ext.storageSet(cardRecoveryCooldownKey(userId), '');
     replyWithButtons(ctx, msg, pending.quizHasCards
-      ? '角色卡验证通过，QQ身份绑定成功。'
+      ? (pending.isSwitchBot ? '角色卡验证通过，已成功将当前QQ官Bot账号绑定至原QQ（并提升为主绑定）。' : '角色卡验证通过，QQ身份绑定成功。')
       : '已确认该QQ没有历史角色卡，按新用户完成身份绑定。', [
       [{ label: '📊 查看绑定状态', command: '.QQ绑定 状态', enter: true, style: 1 }]
     ]);
@@ -1054,10 +1192,12 @@ const cmdGroupBind = seal.ext.newCmdItemInfo();
 cmdGroupBind.name = 'QQ群绑定';
 cmdGroupBind.help = `将官Bot群绑定到原QQ群，以继续使用原群插件数据。
 官Bot群：.QQ群绑定 <原QQ群号>
+换号换绑：.QQ群绑定 换绑 <原QQ群号>
 原QQ群：.QQ群绑定确认 <验证码>
 旧Bot不可用：.QQ群绑定验证 <验证码> <选项序号>
+纯OpenID群恢复：.QQ群恢复 <Log名字>
 查看：.QQ群绑定 状态
-解除：.QQ群绑定 解绑`;
+解除：.QQ群绑定 解绑 [原QQ群号]`;
 cmdGroupBind.solve = (ctx, msg, cmdArgs) => {
   const op = String(cmdArgs.getArgN(1) || '状态').trim();
   const groupId = currentGroupId(ctx, msg);
@@ -1078,6 +1218,11 @@ cmdGroupBind.solve = (ctx, msg, cmdArgs) => {
     return commandResult();
   }
 
+  if (op === '恢复' || op === 'log恢复' || op.toLowerCase() === 'restore') {
+    const logArg = String(cmdArgs.getArgN(2) || '').trim();
+    return cmdGroupRestore.solve(ctx, msg, { getArgN: idx => (idx === 1 ? logArg : '') });
+  }
+
   if (op === '状态' || op.toLowerCase() === 'status') {
     const bound = officialGroup ? readBinding('group', groupId) : readReverseBinding('group', legacyGroupId);
     replyWithButtons(ctx, msg, bound
@@ -1094,19 +1239,34 @@ cmdGroupBind.solve = (ctx, msg, cmdArgs) => {
     );
     return commandResult();
   }
+
   if (op === '解绑' || op.toLowerCase() === 'unbind') {
-    const ownerId = officialGroup ? String(ext.storageGet(`binding:group-owner:${groupId}`) || '') : '';
-    if (officialGroup && ownerId && ownerId !== userId && Number(ctx && ctx.privilegeLevel || 0) < 100) {
-      seal.replyToSender(ctx, msg, '只有最初完成群绑定的官Bot用户或骰主可以在官Bot群解除绑定。');
-      return commandResult();
+    const rawTarget = String(cmdArgs.getArgN(2) || '').trim();
+    const explicitTarget = normalizeLegacyGroupId(rawTarget);
+    let removed = false;
+    if (explicitTarget) {
+      const isOwner = (officialGroup && readBinding('group', groupId) === explicitTarget) || legacyGroupId === explicitTarget;
+      const isPrivileged = Number(ctx && ctx.privilegeLevel || 0) >= 40;
+      if (isOwner || isPrivileged) {
+        removed = removeBinding('group', '', explicitTarget);
+      } else {
+        seal.replyToSender(ctx, msg, '只有该QQ群管理或骰主可以解除该指定QQ群绑定。');
+        return commandResult();
+      }
+    } else {
+      const ownerId = officialGroup ? String(ext.storageGet(`binding:group-owner:${groupId}`) || '') : '';
+      if (officialGroup && ownerId && ownerId !== userId && Number(ctx && ctx.privilegeLevel || 0) < 100) {
+        seal.replyToSender(ctx, msg, '只有最初完成群绑定的官Bot用户或骰主可以在官Bot群解除绑定。');
+        return commandResult();
+      }
+      if (!officialGroup && Number(ctx && ctx.privilegeLevel || 0) < 40) {
+        seal.replyToSender(ctx, msg, '在原QQ群解除绑定需要群管理、群主或骰主权限。');
+        return commandResult();
+      }
+      removed = officialGroup
+        ? removeBinding('group', groupId, '')
+        : removeBinding('group', '', legacyGroupId);
     }
-    if (!officialGroup && Number(ctx && ctx.privilegeLevel || 0) < 40) {
-      seal.replyToSender(ctx, msg, '在原QQ群解除绑定需要群管理、群主或骰主权限。');
-      return commandResult();
-    }
-    const removed = officialGroup
-      ? removeBinding('group', groupId, '')
-      : removeBinding('group', '', legacyGroupId);
     replyWithButtons(ctx, msg, removed ? 'QQ群绑定已解除。' : '当前群没有可解除的QQ群绑定。',
       officialGroup ? [
         [
@@ -1116,12 +1276,21 @@ cmdGroupBind.solve = (ctx, msg, cmdArgs) => {
     );
     return commandResult();
   }
+
+  let isExplicitSwitch = false;
+  let target = '';
+  if (op === '换号' || op === '换绑' || op.toLowerCase() === 'switch' || op.toLowerCase() === 'rebind') {
+    isExplicitSwitch = true;
+    target = normalizeLegacyGroupId(cmdArgs.getArgN(2));
+  } else {
+    target = normalizeLegacyGroupId(op);
+  }
+
   if (!officialGroup) {
     seal.replyToSender(ctx, msg, '请先在QQ官Bot群中使用 .QQ群绑定 <原QQ群号> 发起绑定。');
     return commandResult();
   }
 
-  const target = normalizeLegacyGroupId(op);
   if (!target) {
     replyWithButtons(ctx, msg, 'QQ群号格式不正确。用法：.QQ群绑定 <原QQ群号>', [
       [
@@ -1144,20 +1313,40 @@ cmdGroupBind.solve = (ctx, msg, cmdArgs) => {
     seal.replyToSender(ctx, msg, '只有最初完成群绑定的官Bot用户或骰主可以更换该群绑定。');
     return commandResult();
   }
-  if (readReverseBinding('group', target) && readReverseBinding('group', target) !== groupId) {
-    seal.replyToSender(ctx, msg, '该QQ群已经绑定了另一个官Bot群。');
-    return commandResult();
+
+  const claimedBy = readReverseBinding('group', target);
+  let isCrossBotGroup = false;
+  if (claimedBy && claimedBy !== groupId) {
+    isCrossBotGroup = isExplicitSwitch ||
+      extractBotId(claimedBy) !== extractBotId(groupId) ||
+      Number(ctx && ctx.privilegeLevel || 0) >= 100;
+    if (!isCrossBotGroup) {
+      seal.replyToSender(ctx, msg, '该QQ群已经绑定了另一个官Bot群。若需换绑，请使用：.QQ群绑定 换绑 <原QQ群号>');
+      return commandResult();
+    }
   }
+
   const cooldown = remainingGroupLogRecoveryCooldown(groupId);
   const quiz = cooldown > 0 ? null : buildGroupLogRecoveryQuiz(target);
-  const pendingExtra = quiz && quiz.available
-    ? { quizAnswer: quiz.answer, quizHasLogs: quiz.hasLogs }
-    : {};
+  const pendingExtra = {
+    isRebind: !!claimedBy && claimedBy !== groupId,
+    oldOfficialGroupId: claimedBy || ''
+  };
+  if (quiz && quiz.available) {
+    pendingExtra.quizAnswer = quiz.answer;
+    pendingExtra.quizHasLogs = quiz.hasLogs;
+  }
   const code = createPending('group', groupId, target, userId, pendingExtra);
-  const lines = [
-    `群绑定验证码：${code}`,
-    `旧Bot可用时，请在10分钟内由原QQ群的管理、群主或骰主发送：.QQ群绑定确认 ${code}`
-  ];
+  const lines = isCrossBotGroup
+    ? [
+        `检测到该QQ群曾绑定到官Bot群（可能为旧Bot换号）。`,
+        `换绑验证码：${code}`,
+        `旧Bot可用时，请在10分钟内由原QQ群的管理、群主或骰主发送：.QQ群绑定确认 ${code}`
+      ]
+    : [
+        `群绑定验证码：${code}`,
+        `旧Bot可用时，请在10分钟内由原QQ群的管理、群主或骰主发送：.QQ群绑定确认 ${code}`
+      ];
   let buttonRows = [];
   if (quiz && quiz.available) {
     lines.push('', renderGroupLogRecoveryQuiz(code, quiz));
@@ -1197,9 +1386,11 @@ cmdGroupConfirm.solve = (ctx, msg, cmdArgs) => {
     return commandResult();
   }
   try {
-    writeBinding('group', pending.officialId, pending.legacyId, pending.requesterId);
+    writeBinding('group', pending.officialId, pending.legacyId, pending.requesterId, true);
     consumePending(code, pending);
-    replyWithButtons(ctx, msg, 'QQ群绑定成功，官Bot群插件将继续使用原群的历史数据。', [
+    replyWithButtons(ctx, msg, pending.isRebind
+      ? 'QQ群换绑成功，已接管原群历史数据，官Bot群插件将继续使用原群的历史数据。'
+      : 'QQ群绑定成功，官Bot群插件将继续使用原群的历史数据。', [
       [{ label: '📊 查看群绑定状态', command: '.QQ群绑定 状态', enter: true, style: 1 }]
     ]);
   } catch (err) {
@@ -1244,11 +1435,11 @@ cmdGroupLogVerify.solve = (ctx, msg, cmdArgs) => {
     return commandResult();
   }
   try {
-    writeBinding('group', pending.officialId, pending.legacyId, pending.requesterId);
+    writeBinding('group', pending.officialId, pending.legacyId, pending.requesterId, true);
     consumePending(code, pending);
     ext.storageSet(groupLogRecoveryCooldownKey(groupId), '');
     replyWithButtons(ctx, msg, pending.quizHasLogs
-      ? '群Log验证通过，QQ群绑定成功。'
+      ? (pending.isRebind ? '群Log验证通过，已成功换绑并接管原QQ群历史数据。' : '群Log验证通过，QQ群绑定成功。')
       : '已确认该群没有历史Log，按新群完成QQ群绑定。', [
       [{ label: '📊 查看群绑定状态', command: '.QQ群绑定 状态', enter: true, style: 1 }]
     ]);
@@ -1258,18 +1449,218 @@ cmdGroupLogVerify.solve = (ctx, msg, cmdArgs) => {
   return commandResult();
 };
 
+const cmdGroupRestore = seal.ext.newCmdItemInfo();
+cmdGroupRestore.name = 'QQ群恢复';
+cmdGroupRestore.help = `用于在换号后恢复未绑定普通QQ群的纯OpenID群历史数据：
+.QQ群恢复 <历史Log名字>
+确认恢复：.QQ群恢复确认 <验证码>`;
+cmdGroupRestore.solve = (ctx, msg, cmdArgs) => {
+  const groupId = currentGroupId(ctx, msg);
+  const userId = currentUserId(ctx, msg);
+  if (!isOfficialGroupId(groupId)) {
+    seal.replyToSender(ctx, msg, '请在QQ官Bot群中使用该指令恢复纯OpenID群历史数据。');
+    return commandResult();
+  }
+
+  const logName = String(cmdArgs.getArgN(1) || '').trim();
+  if (!logName || logName === '帮助' || logName.toLowerCase() === 'help') {
+    replyWithButtons(ctx, msg, cmdGroupRestore.help + '\n提示：输入您在原群记录过的跑团Log名字，插件将展示该Log及登场角色名供您核验。', [
+      [{ label: '📜 查看帮助', command: '.QQ群恢复 帮助', enter: true, style: 0 }]
+    ]);
+    return commandResult();
+  }
+
+  const allCandidates = findOfficialQQGroupLogCandidates(logName);
+  const candidates = allCandidates.filter(c => c && c.groupId && c.groupId !== groupId);
+
+  if (candidates.length === 0) {
+    if (allCandidates.some(c => c && c.groupId === groupId)) {
+      seal.replyToSender(ctx, msg, `日志“${logName}”已属于当前群，无需恢复。`);
+      return commandResult();
+    }
+    seal.replyToSender(ctx, msg, `未找到名为“${logName}”的历史跑团日志。\n请检查Log名字是否完全一致（名称需与原群中记录的Log名相符）。`);
+    return commandResult();
+  }
+
+  candidates.sort((a, b) => {
+    const aOff = isOfficialGroupId(a.groupId) ? 1 : 0;
+    const bOff = isOfficialGroupId(b.groupId) ? 1 : 0;
+    if (aOff !== bOff) return bOff - aOff;
+    return Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0);
+  });
+  const best = candidates[0];
+
+  const charList = Array.isArray(best.characterNames) && best.characterNames.length > 0
+    ? best.characterNames.join('、')
+    : '（无登场角色记录）';
+
+  const code = createPending('group-restore', groupId, best.groupId, userId, {
+    logName: best.name,
+    characterNames: best.characterNames || []
+  });
+
+  const lines = [
+    `📜 检索到匹配的历史跑团Log：`,
+    `• 日志名称：${best.name}`,
+    `• 记录时间：${formatTimestamp(best.createdAt || best.updatedAt)}`,
+    `• 登场角色：${charList}`,
+    `• 原群标识：${maskGroupId(best.groupId)}`,
+    ``,
+    `🔍 请核对上述登场角色名是否为原群跑团成员。`,
+    `如确认无误，请在10分钟内发送：`,
+    `.QQ群恢复确认 ${code}`,
+    `（确认后，该历史群的全部Log与数据将重绑定并桥接至当前新群）`
+  ];
+
+  replyWithButtons(ctx, msg, lines.join('\n'), [
+    [{ label: '✅ 确认恢复并重绑定', command: `.QQ群恢复确认 ${code}`, enter: true, style: 1 }]
+  ]);
+  return commandResult();
+};
+
+const cmdGroupRestoreConfirm = seal.ext.newCmdItemInfo();
+cmdGroupRestoreConfirm.name = 'QQ群恢复确认';
+cmdGroupRestoreConfirm.help = '确认纯OpenID群历史数据恢复与重绑定：.QQ群恢复确认 <验证码>';
+cmdGroupRestoreConfirm.solve = (ctx, msg, cmdArgs) => {
+  const code = String(cmdArgs.getArgN(1) || '').trim();
+  const pending = /^\d{8}$/.test(code) ? loadPending(code) : null;
+  const groupId = currentGroupId(ctx, msg);
+  const userId = currentUserId(ctx, msg);
+
+  if (!pending || pending.kind !== 'group-restore') {
+    seal.replyToSender(ctx, msg, '验证码无效或已过期，请重新使用 .QQ群恢复 <Log名字> 发起。');
+    return commandResult();
+  }
+  if (!isOfficialGroupId(groupId) || groupId !== pending.officialId) {
+    seal.replyToSender(ctx, msg, '必须在发起恢复的QQ官Bot群中确认。');
+    return commandResult();
+  }
+  const priv = Number(ctx && ctx.privilegeLevel || 0);
+  if (userId !== pending.requesterId && priv < 40) {
+    seal.replyToSender(ctx, msg, '只有发起恢复的用户或群管理员/群主可以确认。');
+    return commandResult();
+  }
+
+  const oldGroupId = pending.legacyId;
+  const newGroupId = pending.officialId;
+
+  try {
+    writeBinding('group', newGroupId, oldGroupId, userId, true);
+    consumePending(code, pending);
+    replyWithButtons(ctx, msg,
+      `🎉 历史群聊数据恢复成功！\n已将原群（${maskGroupId(oldGroupId)}）的跑团日志【${pending.logName}】及历史数据桥接至当前新群。\n现在您可以直接在新群使用 .log list / .log get 查看历史日志，角色卡数据已同步连接。`, [
+        [{ label: '📜 查看历史日志', command: '.log list', enter: true, style: 0 }]
+      ]
+    );
+  } catch (err) {
+    seal.replyToSender(ctx, msg, `群恢复失败：${err.message || err}`);
+  }
+  return commandResult();
+};
+
+const cmdMigrateDice = seal.ext.newCmdItemInfo();
+cmdMigrateDice.name = 'QQ换号迁移';
+cmdMigrateDice.help = `QQ官Bot换号迁移管理（仅骰主）：
+.QQ换号迁移 状态
+.QQ换号迁移 清理旧号 <旧BotID/UIN>`;
+cmdMigrateDice.solve = (ctx, msg, cmdArgs) => {
+  if (Number(ctx && ctx.privilegeLevel || 0) < 100) {
+    seal.replyToSender(ctx, msg, '只有骰主可以执行换号迁移管理指令。');
+    return commandResult();
+  }
+  const op = String(cmdArgs.getArgN(1) || '状态').trim();
+
+  if (op === '状态' || op.toLowerCase() === 'status') {
+    const items = loadBindingIndex();
+    const stats = {};
+    let totalUsers = 0;
+    let totalGroups = 0;
+
+    items.forEach(item => {
+      if (!item || !item.officialId) return;
+      const botId = extractBotId(item.officialId) || '无Bot前缀/未知';
+      if (!stats[botId]) stats[botId] = { users: 0, groups: 0 };
+      if (item.kind === 'user') {
+        stats[botId].users++;
+        totalUsers++;
+      } else if (item.kind === 'group') {
+        stats[botId].groups++;
+        totalGroups++;
+      }
+    });
+
+    const lines = [
+      `=== QQ官方Bot绑定与换号状态 ===`,
+      `总记录数: ${items.length} 条 (用户: ${totalUsers} 人, 群聊: ${totalGroups} 个)`,
+      `Bot账号分布:`
+    ];
+    Object.keys(stats).forEach(bot => {
+      lines.push(`• Bot [${bot}]: 用户 ${stats[bot].users} 人, 群聊 ${stats[bot].groups} 个`);
+    });
+    if (Object.keys(stats).length === 0) {
+      lines.push('（暂无绑定记录）');
+    }
+    lines.push('', '提示：使用 .QQ换号迁移 清理旧号 <旧BotID> 可批量解除旧Bot的占用记录。');
+    replyWithButtons(ctx, msg, lines.join('\n'), [
+      [{ label: '📊 刷新状态', command: '.QQ换号迁移 状态', enter: true, style: 0 }]
+    ]);
+    return commandResult();
+  }
+
+  if (op === '清理旧号' || op.toLowerCase() === 'clean') {
+    const targetBot = String(cmdArgs.getArgN(2) || '').trim();
+    if (!targetBot) {
+      seal.replyToSender(ctx, msg, '请指定要清理的旧Bot账号ID/UIN。\n用法：.QQ换号迁移 清理旧号 <旧BotID>');
+      return commandResult();
+    }
+    const items = loadBindingIndex();
+    const toClean = items.filter(item => item && item.officialId &&
+      (extractBotId(item.officialId) === targetBot || item.officialId.includes(targetBot)));
+
+    if (toClean.length === 0) {
+      seal.replyToSender(ctx, msg, `未找到关联旧Bot [${targetBot}] 的历史绑定记录。`);
+      return commandResult();
+    }
+
+    let cleaned = 0;
+    toClean.forEach(item => {
+      removeBinding(item.kind, item.officialId, item.legacyId);
+      cleaned++;
+    });
+
+    replyWithButtons(ctx, msg, `已成功清理旧Bot [${targetBot}] 的历史绑定记录，共解除 ${cleaned} 条（用户/群）。`, [
+      [{ label: '📊 查看迁移状态', command: '.QQ换号迁移 状态', enter: true, style: 0 }]
+    ]);
+    return commandResult();
+  }
+
+  replyWithButtons(ctx, msg, cmdMigrateDice.help, [
+    [{ label: '📊 迁移状态', command: '.QQ换号迁移 状态', enter: true, style: 0 }]
+  ]);
+  return commandResult();
+};
+
 ext.cmdMap['QQ绑定'] = cmdUserBind;
 ext.cmdMap['qqbind'] = cmdUserBind;
 ext.cmdMap['QQ绑定确认'] = cmdUserConfirm;
 ext.cmdMap['qqbindconfirm'] = cmdUserConfirm;
 ext.cmdMap['QQ绑定验证'] = cmdUserCardVerify;
 ext.cmdMap['qqbindverify'] = cmdUserCardVerify;
+
 ext.cmdMap['QQ群绑定'] = cmdGroupBind;
 ext.cmdMap['qqgroupbind'] = cmdGroupBind;
 ext.cmdMap['QQ群绑定确认'] = cmdGroupConfirm;
 ext.cmdMap['qqgroupbindconfirm'] = cmdGroupConfirm;
 ext.cmdMap['QQ群绑定验证'] = cmdGroupLogVerify;
 ext.cmdMap['qqgroupbindverify'] = cmdGroupLogVerify;
+
+ext.cmdMap['QQ群恢复'] = cmdGroupRestore;
+ext.cmdMap['qqgrouprestore'] = cmdGroupRestore;
+ext.cmdMap['QQ群恢复确认'] = cmdGroupRestoreConfirm;
+ext.cmdMap['qqgrouprestoreconfirm'] = cmdGroupRestoreConfirm;
+
+ext.cmdMap['QQ换号迁移'] = cmdMigrateDice;
+ext.cmdMap['qqmigrate'] = cmdMigrateDice;
 
 globalThis.SealOfficialQQIdentityBridge = {
   version: VERSION,
@@ -1281,11 +1672,15 @@ globalThis.SealOfficialQQIdentityBridge = {
   getUserBinding: userId => readBinding('user', userId),
   getGroupBinding: groupId => readBinding('group', groupId),
   getAllBindings: () => loadBindingIndex(),
+  findGroupLogCandidates: findOfficialQQGroupLogCandidates,
   buildCommandButton,
   buildKeyboardRows,
   buildQuizKeyboardRows,
   normalizeKeyboardRows,
-  replyWithButtons
+  replyWithButtons,
+  extractBotId,
+  isOfficialGroupId,
+  getOfficialQQIdentity
 };
 
 ext.onMessageReceived = (ctx, msg) => {
